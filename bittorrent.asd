@@ -7,9 +7,10 @@
   :license "MIT"
   :author "Kevin Galligan"
   :description "Implementation of the BitTorrent protocol."
-  :depends-on (:esrap :trees)
+  :depends-on (:esrap :trees :usocket :dexador :quri :sha1)
   :pathname "src"
   :serial t
   :components ((:file "package")
                (:file "bencode")
+               (:file "tracker")
                ))

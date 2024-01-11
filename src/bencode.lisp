@@ -1,7 +1,10 @@
+;;;; Encoding and decoding of the bencode format.
+
 (defpackage :bencode
   (:use :cl :esrap)
   (:export
    :bencode
+   :bencode-to-stream
    :bdecode
    :dict-get))
 
@@ -68,32 +71,42 @@
       d)))
 
 (defun bdecode (string)
+  "Decodes bencoded data. Output will be an integer, string, list, or
+whatever data structure is used to represent dicts."
   (parse 'ben string))
 
-(defun bencode (data)
-  (labels
-      ((encode (data outstream)
-         (cond
-           ((integerp data)
-            (format outstream "i~ae" data))
-           ((stringp data)
-            (format outstream "~a:~a" (length data) data))
-           ((listp data)
-            (write-string "l" outstream)
-            ;; Not ideal to use recursion, could blow the stack.
-            ;; But it'll do for now.
-            (loop for item in data
-                  do (encode item outstream))
-            (write-string "e" outstream))
-           ((eq (type-of data) 'binary-trees:binary-tree)
-            (write-string "d" outstream)
-            (trees:dotree (node data)
-              (encode (first node) outstream)
-              (encode (second node) outstream))
-            (write-string "e" outstream))
-           (t (error "Unknown data type.")))))
-    (with-output-to-string (s)
-      (encode data s))))
+(defun bencode-to-stream (data outstream)
+  (cond
+    ((integerp data)
+     (format outstream "i~ae" data))
+    ((stringp data)
+     (format outstream "~a:~a" (length data) data))
+    ((listp data)
+     (write-string "l" outstream)
+     ;; Not ideal to use recursion, could blow the stack.
+     ;; But it'll do for now.
+     (loop for item in data
+           do (bencode-to-stream item outstream))
+     (write-string "e" outstream))
+    ((eq (type-of data) 'binary-trees:binary-tree)
+     (write-string "d" outstream)
+     (trees:dotree (node data)
+                   (bencode-to-stream (first node) outstream)
+                   (bencode-to-stream (second node) outstream))
+     (write-string "e" outstream))
+    (t (error "Unknown data type."))))
 
-(defun dict-get (dict key)
-  (second (trees:find key dict)))
+(defun bencode (data)
+  "Encodes DATA -- which can be an integer, string, list, whatever
+data structure is used to represent a dict, or any nested combination of
+those -- in the bencoding format. Output is a string."
+  (with-output-to-string (s)
+    (bencode-to-stream data s)))
+
+(defun dict-get (dict &rest keys)
+  "Get data from nested dicts. KEYS should be strings. Returns NIL if
+any of the keys are missing."
+  (loop for key in keys
+        while dict
+        do (setf dict (second (trees:find key dict))))
+  dict)

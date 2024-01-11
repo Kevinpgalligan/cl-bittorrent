@@ -11,4 +11,6 @@
   :serial t
   :components ((:file "package")
                (:file "bencode")
+               (:file "torrent")
+               (:file "tracker")
                ))
