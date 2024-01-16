@@ -2,15 +2,30 @@
 
 (in-package bittorrent)
 
+(defclass torrent ()
+  ((metainfo :initarg :metainfo :accessor metainfo)
+   (info-hash :initarg :info-hash :accessor info-hash)
+   (total-length :initarg :total-length :accessor total-length)))
+
+(defun torrent-tracker-list (torrent)
+  (with-slots (metainfo) torrent
+    ;; 'announce-list' is optional, use 'announce' as a backup.
+    (or (car (bencode:dict-get metainfo "announce-list"))
+        (list (bencode:dict-get metainfo "announce")))))
+
 (defun load-torrent-file (path)
-  "Loads a bencoded .torrent file into a string."
+  "Loads and parses a bencoded .torrent file."
+  (let ((metainfo (bencode:bdecode (read-torrent-to-string path))))
+    (make-instance 'torrent
+                   :metainfo metainfo
+                   :info-hash (compute-info-hash metainfo)
+                   :total-length (compute-total-length metainfo))))
+
+(defun read-torrent-to-string (path)
+  "Reads a bencoded .torrent file into a string."
   ;; Use ISO-8859-1 because it maps each byte value to a character, so
   ;; the mix of ASCII and raw bytes in a .torrent file won't cause an error.
   (uiop:read-file-string path :external-format :iso-8859-1))
-
-(defun parse-torrent-file (path)
-  "Loads a bencoded .torrent file and decodes it."
-  (bencode:bdecode (load-torrent-file path)))
 
 (defun compute-info-hash (metainfo &key (output-type :bytes))
   "Extracts the 'info' field from a metainfo dict and computes its SHA1
