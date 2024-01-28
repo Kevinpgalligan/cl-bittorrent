@@ -1,2 +1,10 @@
 (defpackage :bittorrent
-  (:use :cl))
+  (:use :cl)
+  (:export
+   :make-message-buffer
+   :mb-store
+   :make-message
+   :message=
+   :bytes
+   :read-in-bytes
+   :parse-message-len))

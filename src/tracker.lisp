@@ -4,25 +4,30 @@
 
 (defclass tracker-response ()
   ((failure-reason :initarg :failure-reason :accessor failure-reason)
-   (warning-message :initarg :warning-message :accessor warning_message)
+   (warning-message :initarg :warning-message :accessor warning-message)
    (interval :initarg :interval :accessor interval)
-   (min-interval :initarg :min-interval :accessor interval)
+   (min-interval :initarg :min-interval :accessor min-interval)
    (tracker-id :initarg :tracker-id :accessor tracker-id)
    (complete :initarg :complete :accessor complete)
    (incomplete :initarg :incomplete :accessor incomplete)
-   (peers :initarg :peers :accessor incomplete)))
+   (peers :initarg :peers :accessor peers)))
 
 (defun tracker-http-p (tracker-url)
   (let ((uri (quri:make-uri :defaults tracker-url)))
     (or (quri:uri-http-p uri)
         (quri:uri-https-p uri))))
 
-(defun query-tracker (torrent &key (port 6881) tracker-url peer-id verbose)
+(deftype tracker-event () '(member :started :completed :stopped))
+
+(defun query-tracker (torrent &key (port 6881) tracker-url
+                                peer-id verbose (event :started)
+                                (bytes-left (total-length torrent)))
   "Queries a tracker over HTTP. If no TRACKER-URL (string) is supplied, one
 is chosen randomly from the torrent. PORT is the port that is advertised to
 the tracker. PEER-ID is the 20-byte ID of the client; if not provided, a
-random one is used. If VERBOSE is true, prints stuff to standard output.
+random one is generated. If VERBOSE is true, prints stuff to standard output.
 Returns the response and the peer ID."
+  (declare (type (tracker-event) event))
   (when (null tracker-url)
     (let ((http-trackers (remove-if-not #'tracker-http-p
                                         (torrent-tracker-list torrent))))
@@ -34,8 +39,9 @@ Returns the response and the peer ID."
   (when (not peer-id)
     (setf peer-id (coerce (loop repeat 20 collect (code-char (random 256)))
                           'string)))
-  (let ((bendata (send-http-request-to-tracker tracker-url torrent peer-id port
-                                               :verbose verbose)))
+  (let ((bendata (send-http-request-to-tracker
+                  tracker-url torrent peer-id port event bytes-left
+                  :verbose verbose)))
     (values
      (make-instance 'tracker-response
                     :failure-reason (bencode:dict-get bendata "failure reason")
@@ -48,8 +54,9 @@ Returns the response and the peer ID."
                     :peers (parse-peers bendata))
      peer-id)))
 
-(defun send-http-request-to-tracker (url torrent peer-id port &key verbose)
-  (let ((uri (make-tracker-uri url torrent peer-id port)))
+(defun send-http-request-to-tracker (url torrent peer-id port event bytes-left
+                                     &key verbose)
+  (let ((uri (make-tracker-uri url torrent peer-id port event bytes-left)))
     (when verbose
       (format t "Requesting tracker: ~a~%" uri))
     ;; Must provide dex with the ':force-binary' option, as otherwise
@@ -60,7 +67,7 @@ Returns the response and the peer ID."
      (flexi-streams:octets-to-string
       (dex:get uri :force-binary t)))))
 
-(defun make-tracker-uri (url torrent peer-id port)
+(defun make-tracker-uri (url torrent peer-id port event bytes-left)
   ;; Rendering because I was getting 400 responses
   ;; when I used the URI object.
   (quri:render-uri
@@ -81,16 +88,10 @@ Returns the response and the peer ID."
       (cons "port" port)
       (cons "uploaded" 0)
       (cons "downloaded" 0)
-      (cons "left" (total-length torrent))
+      (cons "left" bytes-left)
       (cons "compact" 1)
-      ;; Need to handle "stopped" and "completed" events too.
-      (cons "event" "started"))
+      (cons "event" (string-downcase (symbol-name event))))
      :encoding :iso-8859-1))))
-
-(defclass peer ()
-  ((ip :initarg :ip :accessor ip)
-   (port :initarg :port :accessor port)
-   (id :initarg :id :accessor id)))
 
 (defun parse-peers (bendata)
   "Parses list from tracker response."

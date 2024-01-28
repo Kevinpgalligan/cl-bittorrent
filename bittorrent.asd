@@ -15,5 +15,7 @@
   :components ((:file "package")
                (:file "bencode")
                (:file "torrent")
+               (:file "message")
+               (:file "peer")
                (:file "tracker")
                ))

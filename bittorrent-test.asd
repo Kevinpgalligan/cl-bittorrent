@@ -11,4 +11,5 @@
   :serial t
   :components ((:file "package")
                (:file "bencode")
+               (:file "message")
                ))
