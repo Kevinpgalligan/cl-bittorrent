@@ -134,3 +134,40 @@
                                          20)))
 (test bitfield-too-long (signals error
                           (send-packets '(#(0 0 0 3 5 1 2)))))
+
+
+(defun survives-roundtrip (msg)
+  (let ((msg-buff (make-message-buffer 10 200))
+        (bytes (make-array 100 :fill-pointer 0 :adjustable t)))
+    (serialise-message msg bytes)
+    (message= msg (first (mb-store msg-buff bytes)))))
+
+(test roundtrip-keepalive (survives-roundtrip (make-message :id :keep-alive)))
+(test roundtrip-choke (survives-roundtrip (make-message :id :choke)))
+(test roundtrip-unchoke (survives-roundtrip (make-message :id :unchoke)))
+(test roundtrip-interested (survives-roundtrip (make-message :id :interested)))
+(test roundtrip-not-interested (survives-roundtrip (make-message :id :not-interested)))
+(test roundtrip-have
+      (survives-roundtrip
+       (make-message :id :have :data 1231344)))
+(test roundtrip-request
+      (survives-roundtrip
+       (make-message :id :request
+                     :data '(:index 0
+                             :begin 424242
+                             :length 12345))))
+(test roundtrip-cancel
+      (survives-roundtrip
+       (make-message :id :cancel
+                     :data '(:index 0
+                             :begin 123144
+                             :length 1))))
+(test roundtrip-bitfield
+      (survives-roundtrip
+       (make-message :id :bitfield :data #*0100101001)))
+(test roundtrip-piece
+      (survives-roundtrip
+       (make-message :id :piece
+                     :data '(:index 12
+                             :begin 12345
+                             :block #(1 2 3 4 5 6 7 8 9 10)))))

@@ -7,4 +7,6 @@
    :message=
    :bytes
    :read-in-bytes
-   :parse-message-len))
+   :parse-message-len
+   :serialise-message
+   :id))

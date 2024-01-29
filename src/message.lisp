@@ -1,4 +1,4 @@
-;;;; Peer-to-peer messages and their buffering/parsing.
+;;;; Peer-to-peer messages and their buffering/parsing/serialising.
 
 (in-package bittorrent)
 
@@ -8,7 +8,7 @@
 
 (defclass message ()
   ((id :initarg :id :reader id)
-   (data :initarg :data :initform nil :reader data)))
+   (data :initarg :data :initform nil :accessor data)))
 
 (defmethod print-object ((instance message) stream)
   (format stream "#<MESSAGE id=~a data={~a}>" (id instance) (data instance)))
@@ -103,21 +103,36 @@ Returns the number of bytes read."
           do (vector-push (aref bytes j) (bytes msg-buff)))
     bytes-to-read))
 
+(defparameter *ids*
+  '((0 . :choke)
+    (1 . :unchoke)
+    (2 . :interested)
+    (3 . :not-interested)
+    (4 . :have)
+    (5 . :bitfield)
+    (6 . :request)
+    (7 . :piece)
+    (8 . :cancel)))
+
+(defun num->id (n) (cdr (assoc n *ids*)))
+(defun id->num (id) (car (rassoc id *ids*)))
+
 (defun parse-message (msg-buff len)
   (if (= len 0)
       (make-message :id :keep-alive)
-      (let ((id (message-buffer-ref msg-buff 4)))
-        (case id
-          (0 (make-message :id :choke))
-          (1 (make-message :id :unchoke))
-          (2 (make-message :id :interested))
-          (3 (make-message :id :not-interested))
-          (4 (make-message :id :have :data (parse-have-message msg-buff)))
-          (5 (make-message :id :bitfield :data (parse-bitfield-message msg-buff len)))
-          (6 (make-message :id :request :data (parse-request-message msg-buff)))
-          (7 (make-message :id :piece :data (parse-piece-message msg-buff)))
-          (8 (make-message :id :cancel :data (parse-cancel-message msg-buff)))
-          (t (error (format nil "Unknown message ID ~a." id)))))))
+      (let* ((id-num (message-buffer-ref msg-buff 4))
+             (id (num->id id-num))
+             (msg (make-message :id id)))
+        (when (null id)
+          (error (format nil "Unknown message ID ~a." id-num)))
+        (setf (data msg)
+              (case id
+                (:have (parse-have-message msg-buff))
+                (:bitfield (parse-bitfield-message msg-buff len))
+                (:request (parse-request-message msg-buff))
+                (:piece (parse-piece-message msg-buff))
+                (:cancel (parse-cancel-message msg-buff))))
+        msg)))
 
 (defun parse-have-message (msg-buff)
   (parse-bigen-integer msg-buff 5))
@@ -161,3 +176,67 @@ Returns the number of bytes read."
 
 (defun parse-cancel-message (msg-buff)
   (parse-request-message msg-buff)) ; has the same payload as a request!
+
+(defun serialise-message (msg buffer)
+  "Writes the serialised form of MSG to BUFFER (a byte array)."
+  (let* ((id (id msg))
+         (idnum (id->num id))
+         (data (data msg)))
+    (cond
+      ((eq :keep-alive id)
+       (push-bigen-integer buffer 0)
+       buffer)
+      ((member id '(:choke :unchoke :interested :not-interested))
+       (push-bigen-integer buffer 1)
+       (push-bigen-integer buffer idnum :bytes 1))
+      ((eq id :have)
+       (push-bigen-integer buffer 5)
+       (push-bigen-integer buffer idnum :bytes 1)
+       (push-bigen-integer buffer data))
+      ((member id '(:request :cancel))
+       (push-bigen-integer buffer 13)
+       (push-bigen-integer buffer idnum :bytes 1)
+       (push-bigen-integer buffer (getf data :index))
+       (push-bigen-integer buffer (getf data :begin))
+       (push-bigen-integer buffer (getf data :length)))
+      ((eq id :bitfield)
+       (push-bigen-integer buffer (1+ (calc-bitvec-length-in-bytes data)))
+       (push-bigen-integer buffer idnum :bytes 1)
+       (push-bit-vector buffer data))
+      ((eq id :piece)
+       (push-bigen-integer buffer (+ 9 (length (getf data :block))))
+       (push-bigen-integer buffer idnum :bytes 1)
+       (push-bigen-integer buffer (getf data :index))
+       (push-bigen-integer buffer (getf data :begin))
+       (push-block buffer (getf data :block)))
+      (t (error "Unknown piece type.")))))
+
+(defun push-bigen-integer (buffer value &key (bytes 4))
+  (incf (fill-pointer buffer) bytes)
+  (loop for i below bytes
+        ;; Loops from least-significant byte to most-significant, mod captures
+        ;; the value of that byte and the shift moves it.
+        do (setf (aref buffer (- (fill-pointer buffer) 1 i)) (mod value 256)
+                 value (ash value (- 8)))))
+
+(defun push-block (buffer block)
+  (loop for byte across block
+        do (vector-push-extend byte buffer)))
+
+(defun calc-bitvec-length-in-bytes (bv)
+  (ceiling (length bv) 8))
+
+(defun push-bit-vector (buffer bv)
+  (loop for i = 0 then (1+ i)
+        for bit-i = (* 8 i)
+        while (< bit-i (length bv))
+        do (vector-push-extend (bv-extract-byte bv bit-i) buffer)))
+
+(defun bv-extract-byte (bv start-index)
+  (loop with result = 0
+        for i = 0 then (1+ i)
+        for j = (+ i start-index)
+        while (and (< i 8)
+                   (< j (length bv)))
+        do (setf result (logior (ash result 1) (aref bv j)))
+        finally (return result)))
