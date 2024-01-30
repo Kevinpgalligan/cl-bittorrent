@@ -18,4 +18,5 @@
                (:file "message")
                (:file "peer")
                (:file "tracker")
+               (:file "piece")
                ))

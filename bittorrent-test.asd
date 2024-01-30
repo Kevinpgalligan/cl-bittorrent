@@ -12,4 +12,5 @@
   :components ((:file "package")
                (:file "bencode")
                (:file "message")
+               (:file "piece")
                ))

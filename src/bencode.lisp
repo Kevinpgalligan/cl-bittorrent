@@ -6,9 +6,13 @@
    :bencode
    :bencode-to-stream
    :bdecode
-   :dict-get))
+   :dict-get
+   :dict-has))
 
 (in-package bencode)
+
+(defparameter *on-missing-dict-entry* :return-nil
+  "Can be either :RETURN-NIL or :ERROR.")
 
 (defrule nonzero (or "1" "2" "3" "4" "5" "6" "7" "8" "9"))
 (defrule digit (or "0" nonzero))
@@ -104,9 +108,18 @@ those -- in the bencoding format. Output is a string."
     (bencode-to-stream data s)))
 
 (defun dict-get (dict &rest keys)
-  "Get data from nested dicts. KEYS should be strings. Returns NIL if
-any of the keys are missing."
+  "Get data from nested dicts. KEYS should be strings. Depending on the value
+of *on-missing-dict-entry*, returns NIL if any of the keys are missing, or
+signals an error."
   (loop for key in keys
         while dict
-        do (setf dict (second (trees:find key dict))))
+        do (let ((node (trees:find key dict)))
+             (if (and (null node)
+                      (eq :error *on-missing-dict-entry*))
+                 (error (format nil "Missing key '~a'." key))
+                 (setf dict (second node)))))
   dict)
+
+(defun dict-has (dict &rest keys)
+  (let ((*on-missing-dict-entry* :return-nil))
+    (apply #'dict-get dict keys)))
