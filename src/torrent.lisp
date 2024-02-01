@@ -4,6 +4,7 @@
 
 (defclass torrent ()
   ((metainfo :initarg :metainfo :accessor metainfo)
+   (tracker-list :initarg :tracker-list :accessor tracker-list)
    (info-hash :initarg :info-hash :accessor info-hash)
    (dirname :initarg :dirname :reader dirname)
    (files :initarg :files :reader files)
@@ -17,21 +18,21 @@
    (path :initarg :path :reader path)))
 
 (defun make-filespec (name len path)
-  (make-instance :name name :len len :path path))
+  (make-instance 'filespec :name name :len len :path path))
 
-(defun torrent-tracker-list (torrent)
-  (with-slots (metainfo) torrent
-    (if (bencode:dict-has metainfo "announce-list")
-        (bencode:dict-get metainfo "announce-list")
-        (list (bencode:dict-get metainfo "announce")))))
+(defun extract-tracker-list (metainfo)
+  (if (bencode:dict-has metainfo "announce-list")
+      (first (bencode:dict-get metainfo "announce-list"))
+      (list (bencode:dict-get metainfo "announce"))))
 
 (defun load-torrent-file (path)
   "Loads and parses a bencoded .torrent file."
   (let* ((metainfo (bencode:bdecode (read-torrent-to-string path)))
-         (info (bencode:dict-get info "info"))
+         (info (bencode:dict-get metainfo "info"))
          (files (extract-files metainfo info)))
     (make-instance 'torrent
                    :metainfo metainfo
+                   :tracker-list (extract-tracker-list metainfo)
                    :info-hash (compute-info-hash metainfo)
                    :dirname (and (multifile-mode-p metainfo)
                                  (bencode:dict-get info "name"))

@@ -30,7 +30,7 @@ Returns the response and the peer ID."
   (declare (type (tracker-event) event))
   (when (null tracker-url)
     (let ((http-trackers (remove-if-not #'tracker-http-p
-                                        (torrent-tracker-list torrent))))
+                                        (tracker-list torrent))))
       (when (null http-trackers)
         (error "No HTTP trackers for this torrent!"))
       (setf tracker-url (alexandria:random-elt http-trackers))
