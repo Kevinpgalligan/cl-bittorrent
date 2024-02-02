@@ -37,8 +37,7 @@ Returns the response and the peer ID."
       (when verbose
         (format t "Using tracker: ~a~%" tracker-url))))
   (when (not peer-id)
-    (setf peer-id (coerce (loop repeat 20 collect (code-char (random 256)))
-                          'string)))
+    (setf peer-id (random-peer-id)))
   (let ((bendata (send-http-request-to-tracker
                   tracker-url torrent peer-id port event bytes-left
                   :verbose verbose)))

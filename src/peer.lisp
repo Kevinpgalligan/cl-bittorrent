@@ -14,17 +14,24 @@
    (port :initarg :port :accessor port)
    (id :initarg :id :accessor id)))
 
-(defun peer-loop (torrent id peer receive-queue send-queue)
-  (let (sock
-        (socket-buffer (make-array *socket-buffer-size*
+(defun random-peer-id ()
+  (coerce (loop repeat 20 collect (code-char (random 256)))
+          'string))
+
+(defun peer-loop (torrent id receive-queue send-queue &key peer sock)
+  (when (and (null peer) (null sock))
+    (error "Need one of PEER or SOCK."))
+  (let ((socket-buffer (make-array *socket-buffer-size*
                                    :element-type '(unsigned-byte 8)
                                    :fill-pointer 0))
         (msg-buff (make-message-buffer (num-pieces torrent))))
     (handler-case
-        (progn (setf sock (usocket:socket-connect (ip peer) (port peer)))
-               (send-handshake torrent id sock)
-               (verify-handshake torrent peer sock socket-buffer)
-               (message-loop send-queue receive-queue sock msg-buff socket-buffer))
+        (progn
+          (when (null sock)
+            (setf sock (usocket:socket-connect (ip peer) (port peer))))
+          (send-handshake torrent id sock)
+          (verify-handshake torrent peer sock socket-buffer)
+          (message-loop send-queue receive-queue sock msg-buff socket-buffer))
       (condition (c)
         (when sock
           (usocket:socket-close sock))
@@ -61,8 +68,8 @@
 (defun send-handshake (torrent id sock)
   (let ((stream (usocket:socket-stream sock)))
     (write-sequence *handshake-header* stream)
-    (write-string (info-hash torrent) stream)
-    (write-string id stream)
+    (write-sequence (flexi-streams:string-to-octets (info-hash torrent)) stream)
+    (write-sequence (flexi-streams:string-to-octets id) stream)
     (force-output stream)))
 
 (defun verify-handshake (torrent peer sock socket-buffer)
@@ -110,7 +117,7 @@
 
 (defun handle-instruction (instruction sock socket-buffer)
   (case (tag instruction)
-    (:close (signal 'ordered-to-close))
+    (:shutdown (signal 'ordered-to-close))
     (:peer-message
      (clear-socket-buffer socket-buffer)
      (serialise-message (contents instruction) socket-buffer)
