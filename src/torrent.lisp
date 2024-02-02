@@ -12,6 +12,9 @@
    (piece-length :initarg :piece-length :reader piece-length)
    (piece-hashes :initarg :piece-hashes :reader piece-hashes)))
 
+(defmethod num-pieces ((instance torrent))
+  (length (piece-hashes instance)))
+
 (defclass filespec ()
   ((name :initarg :name :reader name)
    (len :initarg :len :reader len)

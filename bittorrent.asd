@@ -9,11 +9,12 @@
   :description "Implementation of the BitTorrent protocol."
   :depends-on (:esrap :trees :usocket :dexador
                :quri :sha1 :str :flexi-streams
-               :bordeaux-threads)
+               :bordeaux-threads :lparallel)
   :pathname "src"
   :serial t
   :components ((:file "package")
                (:file "bencode")
+               (:file "queue")
                (:file "torrent")
                (:file "message")
                (:file "peer")
