@@ -10,7 +10,9 @@
   (let ((msg-buff (make-message-buffer num-pieces 100)))
     (loop for bytes in list-of-packets
           for emsgs in expected-messages
-          do (let ((msgs (mb-store msg-buff bytes)))
+          do (let ((msgs
+                     (mb-store msg-buff
+                               (flexi-streams:make-in-memory-input-stream bytes))))
                (is (= (length emsgs) (length msgs)))
                (loop for msg in msgs
                      for expected-msg in emsgs
@@ -19,27 +21,8 @@
 (defun send-packets (list-of-packets &optional (num-pieces 8))
   (let ((msg-buff (make-message-buffer num-pieces 100)))
     (loop for bytes in list-of-packets
-          do (mb-store msg-buff bytes))))
-
-(test read-bytes
-  (let ((msg-buff (make-message-buffer 5 100))
-        (packet #(0 1 2 3 4 5 6)))
-    (is (= 5 (read-in-bytes 5 msg-buff packet 0)))
-    (is (equalp #(0 1 2 3 4) (bytes msg-buff)))
-    (is (= 2 (read-in-bytes nil msg-buff packet 5)))
-    (is (equalp #(0 1 2 3 4 5 6) (bytes msg-buff)))))
-
-(test parse-message-len
-  (let ((msg-buff (make-message-buffer 5 100))
-        (packet #(0 0 1 1)))
-    (read-in-bytes 4 msg-buff packet 0)
-    (is (= 257 (parse-message-len msg-buff packet 4)))))
-
-(test parse-message-len-across-buffer-and-packet
-  (let ((msg-buff (make-message-buffer 5 100))
-        (packet #(0 0 1 1)))
-    (read-in-bytes 2 msg-buff packet 0)
-    (is (= 257 (parse-message-len msg-buff packet 2)))))
+          do (mb-store msg-buff
+                       (flexi-streams:make-in-memory-input-stream bytes)))))
 
 (test keepalive
   (store-and-check '(#(0 0 0 0))
@@ -138,9 +121,13 @@
 
 (defun survives-roundtrip (msg)
   (let ((msg-buff (make-message-buffer 10 200))
-        (bytes (make-array 100 :fill-pointer 0 :adjustable t)))
-    (serialise-message msg bytes)
-    (message= msg (first (mb-store msg-buff bytes)))))
+        (stream (flexi-streams:make-in-memory-output-stream)))
+    (serialise-message msg stream)
+    (message= msg
+              (first
+               (mb-store msg-buff
+                         (flexi-streams:make-in-memory-input-stream
+                          (flexi-streams:get-output-stream-sequence stream)))))))
 
 (test roundtrip-keepalive (survives-roundtrip (make-message :id :keep-alive)))
 (test roundtrip-choke (survives-roundtrip (make-message :id :choke)))

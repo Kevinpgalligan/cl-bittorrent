@@ -5,6 +5,7 @@
 ;; 16384 bytes is the standard max request size, but leaving some
 ;; breathing room here.
 (defparameter *message-buff-size* 18000)
+(defparameter *len-field-bytes* 4)
 
 (defclass message ()
   ((id :initarg :id :reader id)
@@ -24,84 +25,71 @@
   ((bytes :initarg :bytes :accessor bytes)
    (size :initarg :size :accessor size)
    (expected-length :initarg :expected-length :accessor expected-length)
-   (num-pieces :initarg :num-pieces :accessor num-pieces)))
+   (num-pieces :initarg :num-pieces :accessor num-pieces)
+   (bytes-count :initarg :bytes-count :accessor bytes-count)
+   (read-pos :initarg :read-pos :accessor read-pos)))
 
 (defun make-message-buffer (num-pieces &optional (size *message-buff-size*))
   (make-instance 'message-buffer
-                 :bytes (make-array size
-                                    :element-type '(unsigned-byte 8)
-                                    :fill-pointer 0)
+                 :bytes (make-array size :element-type '(unsigned-byte 8))
                  :size size
                  :expected-length nil
-                 :num-pieces num-pieces))
+                 :num-pieces num-pieces
+                 :bytes-count 0
+                 :read-pos 0))
 
 (defun clear-message-buffer (msg-buff)
-  (setf (fill-pointer (bytes msg-buff)) 0))
-
-(defun bytes-count (msg-buff)
-  (fill-pointer (bytes msg-buff)))
+  (setf (bytes-count msg-buff) 0)
+  (setf (read-pos msg-buff) 0))
 
 (defun message-buffer-ref (msg-buff i)
   (aref (bytes msg-buff) i))
 
-(defun mb-store (msg-buff bytes)
+(defun mb-store (msg-buff stream)
   "Reads in received bytes from a peer, returns a list of any received messages."
   (with-slots (expected-length) msg-buff
-    (loop with i = 0
-          while (< i (length bytes))
-          ;; We're at the start of a new message! Figure out how long it is.
-          when (null expected-length)
-            do (let ((len (parse-message-len msg-buff bytes i)))
-                 ;; The "new expected length" might actually be nil. It's possible
-                 ;; that fewer than 4 bytes of the next message were received, and
-                 ;; hence we can't even tell how long it will be.
-                 (when len
-                   (if (> len (size msg-buff))
-                       (error "Message length too large.")
-                       ;; Add 4 because the length field doesn't include the bytes in
-                       ;; the length field itself.
-                       (setf expected-length (+ 4 len)))))
-          do (incf i ; Read as much of the message into the buffer as possible!
-                   (read-in-bytes (and expected-length
-                                       (- expected-length (bytes-count msg-buff)))
-                                  msg-buff
-                                  bytes
-                                  i))
-          when (and expected-length (= (bytes-count msg-buff) expected-length))
+    (loop with done = nil
+          while (not done)
+          do (setf done (try-read-in-message msg-buff stream))
+          when (not done)
             ;; We have all the bytes for this message, parse it! Then empty
-            ;; the buffer and get ready for the next message. Subtract 4 from expected
-            ;; length to get the value of the 'len' field of the message.
-            collect (let ((msg (parse-message msg-buff (- expected-length 4))))
+            ;; the buffer and get ready for the next message.
+            collect (let ((msg (parse-message msg-buff
+                                              (- expected-length *len-field-bytes*))))
                       (clear-message-buffer msg-buff)
                       (setf expected-length nil)
                       msg))))
 
-(defun parse-message-len (msg-buff bytes i)
-  "Computes the expected length of the next message.
-It's possible that the 'length' bytes are split between bytes we've already
-received and newly-received bytes, e.g. if at the tail-end of a packet
-we get 3 of the 4 'length' bytes. So need to consider both.
-If all of the 'length' bytes haven't been received, returns nil." 
-  (let ((num-bytes-already (bytes-count msg-buff)))
-    (if (> 4 (+ num-bytes-already (- (length bytes) i)))
-        nil ; not enough bytes to make up the 'len' field
-        (loop for j from 0 upto 3 
-              for mul = (expt 256 (- 3 j)) ; big-endian
-              sum (* mul
-                     (if (< j num-bytes-already)
-                         (message-buffer-ref msg-buff j)
-                         (aref bytes (+ i (- j num-bytes-already)))))))))
+(defun try-read-in-message (msg-buff stream)
+  "Attempts to read a message into MSG-BUFF from bytestream STREAM.
+Returns whether the stream was exhausted (T or NIL) before a complete
+message could be read."
+  (with-slots (expected-length) msg-buff
+    (when (null expected-length)
+      ;; We need to read in the length field before continuing.
+      (read-in-bytes-up-to msg-buff stream *len-field-bytes*)
+      (setf expected-length
+            (if (< (bytes-count msg-buff) *len-field-bytes*)
+                nil
+                (+ *len-field-bytes* ; length doesn't include its own bytes
+                   (loop for j from 0 upto 3 
+                         for mul = (expt 256 (- 3 j)) ; big-endian
+                         sum (* mul (message-buffer-ref msg-buff j)))))))
+    (cond
+      ((null expected-length)
+       t)
+      ((> expected-length (size msg-buff))
+       (error "Message length too big."))
+      (t
+       (read-in-bytes-up-to msg-buff stream expected-length)
+       (< (bytes-count msg-buff) expected-length)))))
 
-(defun read-in-bytes (num-bytes msg-buff bytes i)
-  "Reads NUM-BYTES bytes from BYTES into the message buffer MSG-BUFF, starting
-from index I in BYTES. If NUM-BYTES is nil, it reads all of BYTES into MSG-BUFF.
-Note: it is assumed that, if NUM-BYTES is nil, there's enough space in MSG-BUFF.
-Returns the number of bytes read."
-  (let* ((bytes-to-read (or num-bytes (- (length bytes) i)))
-         (final-index (+ i bytes-to-read)))
-    (loop for j from i below final-index
-          do (vector-push (aref bytes j) (bytes msg-buff)))
-    bytes-to-read))
+(defun read-in-bytes-up-to (msg-buff stream end-pos)
+  (setf (bytes-count msg-buff)
+        (read-sequence (bytes msg-buff)
+                       stream
+                       :start (bytes-count msg-buff)
+                       :end end-pos)))
 
 (defparameter *ids*
   '((0 . :choke)
@@ -117,10 +105,30 @@ Returns the number of bytes read."
 (defun num->id (n) (cdr (assoc n *ids*)))
 (defun id->num (id) (car (rassoc id *ids*)))
 
+(defun consume-byte (msg-buff)
+  (let ((b (message-buffer-ref msg-buff (read-pos msg-buff))))
+    (incf (read-pos msg-buff))
+    b))
+
+(defun consume-remaining-bytes (msg-buff)
+  (let ((bs (subseq (bytes msg-buff)
+                    (read-pos msg-buff)
+                    (expected-length msg-buff))))
+    (setf (read-pos msg-buff) (bytes-count msg-buff))
+    bs))
+
+(defun bytes-remaining-p (msg-buff)
+  (and (expected-length msg-buff)
+       (< (read-pos msg-buff) (expected-length msg-buff))))
+
+(defun bytes-remaining (msg-buff)
+  (- (expected-length msg-buff) (read-pos msg-buff)))
+
 (defun parse-message (msg-buff len)
+  (incf (read-pos msg-buff) 4) ; skip the length field
   (if (= len 0)
       (make-message :id :keep-alive)
-      (let* ((id-num (message-buffer-ref msg-buff 4))
+      (let* ((id-num (consume-byte msg-buff))
              (id (num->id id-num))
              (msg (make-message :id id)))
         (when (null id)
@@ -128,109 +136,103 @@ Returns the number of bytes read."
         (setf (data msg)
               (case id
                 (:have (parse-have-message msg-buff))
-                (:bitfield (parse-bitfield-message msg-buff len))
+                (:bitfield (parse-bitfield-message msg-buff))
                 (:request (parse-request-message msg-buff))
                 (:piece (parse-piece-message msg-buff))
                 (:cancel (parse-cancel-message msg-buff))))
         msg)))
 
 (defun parse-have-message (msg-buff)
-  (parse-bigen-integer msg-buff 5))
+  (consume-bigen-integer msg-buff))
 
-(defun parse-bigen-integer (msg-buff i)
+(defun consume-bigen-integer (msg-buff)
   "Parses a 4-byte big-endian integer."
   ;; I'm sure there are libraries that handle this, oh well.
   (loop for j from 0 below 4
         sum (* (expt 256 (- 3 j))
-               (message-buffer-ref msg-buff (+ i j)))))
+               (consume-byte msg-buff))))
 
-(defun parse-bitfield-message (msg-buff len)
+(defun parse-bitfield-message (msg-buff)
   (with-slots (num-pieces) msg-buff
-    ;; Subtract 1 byte for the length field.
-    (let ((bitfield-size (* 8 (1- len))))
+    ;; Subtract 1 byte for the ID field.
+    (let ((bitfield-size (* 8 (bytes-remaining msg-buff))))
       (when (not (and (>= bitfield-size num-pieces)
                       (< bitfield-size (+ 8 num-pieces))))
         (error "Bitfield is not the correct size."))
       (let ((bitfield (make-array num-pieces :element-type 'bit)))
         ;; I'm sure there's some way to initialize the bit-vector
         ;; directly from the bytes rather than looping over them...
-        (loop for i from 5 below (bytes-count msg-buff)
-              for byte = (message-buffer-ref msg-buff i)
+        (loop while (bytes-remaining-p msg-buff)
+              for byte = (consume-byte msg-buff)
+              for base-index = 0 then (+ base-index 8)
               do (loop for j from 0 below 8
                        for shift = (- 7 j)
-                       for bit-index = (+ (* (- i 5) 8) j)
+                       for bit-index = (+ base-index j)
                        while (< bit-index num-pieces)
                        do (setf (aref bitfield bit-index)
                                 (logand 1 (ash byte (- shift))))))
         bitfield))))
 
 (defun parse-request-message (msg-buff)
-  (list :index (parse-bigen-integer msg-buff 5)
-        :begin (parse-bigen-integer msg-buff 9)
-        :length (parse-bigen-integer msg-buff 13)))
+  (list :index (consume-bigen-integer msg-buff)
+        :begin (consume-bigen-integer msg-buff)
+        :length (consume-bigen-integer msg-buff)))
 
 (defun parse-piece-message (msg-buff)
-  (list :index (parse-bigen-integer msg-buff 5)
-        :begin (parse-bigen-integer msg-buff 9)
-        :block (subseq (bytes msg-buff) 13)))
+  (list :index (consume-bigen-integer msg-buff)
+        :begin (consume-bigen-integer msg-buff)
+        :block (consume-remaining-bytes msg-buff)))
 
 (defun parse-cancel-message (msg-buff)
   (parse-request-message msg-buff)) ; has the same payload as a request!
 
-(defun serialise-message (msg buffer)
-  "Writes the serialised form of MSG to BUFFER (a byte array)."
+(defun serialise-message (msg stream)
+  "Writes the serialised form of MSG to STREAM (a bytestream)."
   (let* ((id (id msg))
          (idnum (id->num id))
          (data (data msg)))
     (cond
       ((eq :keep-alive id)
-       (push-bigen-integer buffer 0)
-       buffer)
+       (write-bigen-integer stream 0))
       ((member id '(:choke :unchoke :interested :not-interested))
-       (push-bigen-integer buffer 1)
-       (push-bigen-integer buffer idnum :bytes 1))
+       (write-bigen-integer stream 1)
+       (write-bigen-integer stream idnum :bytes 1))
       ((eq id :have)
-       (push-bigen-integer buffer 5)
-       (push-bigen-integer buffer idnum :bytes 1)
-       (push-bigen-integer buffer data))
+       (write-bigen-integer stream 5)
+       (write-bigen-integer stream idnum :bytes 1)
+       (write-bigen-integer stream data))
       ((member id '(:request :cancel))
-       (push-bigen-integer buffer 13)
-       (push-bigen-integer buffer idnum :bytes 1)
-       (push-bigen-integer buffer (getf data :index))
-       (push-bigen-integer buffer (getf data :begin))
-       (push-bigen-integer buffer (getf data :length)))
+       (write-bigen-integer stream 13)
+       (write-bigen-integer stream idnum :bytes 1)
+       (write-bigen-integer stream (getf data :index))
+       (write-bigen-integer stream (getf data :begin))
+       (write-bigen-integer stream (getf data :length)))
       ((eq id :bitfield)
-       (push-bigen-integer buffer (1+ (calc-bitvec-length-in-bytes data)))
-       (push-bigen-integer buffer idnum :bytes 1)
-       (push-bit-vector buffer data))
+       (write-bigen-integer stream (1+ (calc-bitvec-length-in-bytes data)))
+       (write-bigen-integer stream idnum :bytes 1)
+       (write-bit-vector stream data))
       ((eq id :piece)
-       (push-bigen-integer buffer (+ 9 (length (getf data :block))))
-       (push-bigen-integer buffer idnum :bytes 1)
-       (push-bigen-integer buffer (getf data :index))
-       (push-bigen-integer buffer (getf data :begin))
-       (push-block buffer (getf data :block)))
+       (write-bigen-integer stream (+ 9 (length (getf data :block))))
+       (write-bigen-integer stream idnum :bytes 1)
+       (write-bigen-integer stream (getf data :index))
+       (write-bigen-integer stream (getf data :begin))
+       (write-sequence (getf data :block) stream))
       (t (error "Unknown piece type.")))))
 
-(defun push-bigen-integer (buffer value &key (bytes 4))
-  (incf (fill-pointer buffer) bytes)
-  (loop for i below bytes
-        ;; Loops from least-significant byte to most-significant, mod captures
-        ;; the value of that byte and the shift moves it.
-        do (setf (aref buffer (- (fill-pointer buffer) 1 i)) (mod value 256)
-                 value (ash value (- 8)))))
-
-(defun push-block (buffer block)
-  (loop for byte across block
-        do (vector-push-extend byte buffer)))
+(defun write-bigen-integer (stream value &key (bytes 4))
+  (loop for i from (1- bytes) downto 0
+        for mul = (expt 256 i)
+        do (write-byte (floor value mul) stream)
+        do (setf value (mod value mul))))
 
 (defun calc-bitvec-length-in-bytes (bv)
   (ceiling (length bv) 8))
 
-(defun push-bit-vector (buffer bv)
+(defun write-bit-vector (stream bv)
   (loop for i = 0 then (1+ i)
         for bit-i = (* 8 i)
         while (< bit-i (length bv))
-        do (vector-push-extend (bv-extract-byte bv bit-i) buffer)))
+        do (write-byte (bv-extract-byte bv bit-i) stream)))
 
 (defun bv-extract-byte (bv start-index)
   (loop with result = 0

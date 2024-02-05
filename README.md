@@ -15,9 +15,16 @@ Then:
 (ql:quickload 'bittorrent)
 ```
 
+### Usage
+TODO
+
 ### Testing
+For unit tests:
+
 ```lisp
 (ql:quickload 'bittorrent-test)
 (in-package bittorrent-test)
 (run! 'bittorrent) ; runs all fiveam tests
 ```
+
+There are multithreading tests in the `scripts/` folder.
