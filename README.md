@@ -28,3 +28,7 @@ For unit tests:
 ```
 
 There are multithreading tests in the `scripts/` folder.
+
+### TODO
+* UDP communication with trackers.
+* Figure out a better way to read bytes from the usocket stream (not one at a time).

@@ -45,6 +45,9 @@
 (defun message-buffer-ref (msg-buff i)
   (aref (bytes msg-buff) i))
 
+(defun (setf message-buffer-ref) (value msg-buff i)
+  (setf (aref (bytes msg-buff) i) value))
+
 (defun mb-store (msg-buff stream)
   "Reads in received bytes from a peer, returns a list of any received messages."
   (with-slots (expected-length) msg-buff
@@ -85,11 +88,16 @@ message could be read."
        (< (bytes-count msg-buff) expected-length)))))
 
 (defun read-in-bytes-up-to (msg-buff stream end-pos)
-  (setf (bytes-count msg-buff)
-        (read-sequence (bytes msg-buff)
-                       stream
-                       :start (bytes-count msg-buff)
-                       :end end-pos)))
+  ;; I wanted to use READ-SEQUENCE, but that hangs if no
+  ;; more bytes are available, rather than stopping. Even
+  ;; this version is imperfect, because LISTEN will return NIL
+  ;; if the peer closes the stream, even when there are still
+  ;; bytes left to read, but I'm willing to accept that shortcoming.
+  (loop while (and (listen stream)
+                   (< (bytes-count msg-buff) end-pos))
+        do (setf (message-buffer-ref msg-buff (bytes-count msg-buff))
+                 (read-byte stream))
+        do (incf (bytes-count msg-buff))))
 
 (defparameter *ids*
   '((0 . :choke)

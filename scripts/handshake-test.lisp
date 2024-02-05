@@ -43,18 +43,19 @@
 (format t "Checking queue for messages, shouldn't be any...~%")
 (loop for msg = (qpop *control-queue*)
       while msg
-      do (format t "~a~%" msg))
+      do (format t "   ~a~%" msg))
 (format t "Done!~%")
 
 ;; Now send a message from one to the other.
+(format t "Sending choke message.~%")
 (qpush *q1*
        (queue-message :tag :peer-message
-                      :contents (make-message :id :unchoke)))
-(sleep 1)
+                      :contents (make-message :id :choke)))
+(sleep 2)
 (format t "Checking queue again, expecting a choke!~%")
 (loop for msg = (qpop *control-queue*)
       while msg
-      do (format t "~a~%" msg))
+      do (format t "   ~a~%" msg))
 (format t "Done.~%")
 
 (format t "Shutting down threads.~%")
@@ -64,10 +65,12 @@
 (format t "Checking queue again, expecting shutdowns!~%")
 (loop for msg = (qpop *control-queue*)
       while msg
-      do (format t "~a~%" msg))
+      do (format t "   ~a~%" msg))
 (format t "Done.~%")
 (format t "Threads: ~a~%" (bt:all-threads))
 (format t "Closing sockets.~%")
+
 (usocket:socket-close *listen-socket*)
 (usocket:socket-close *sock1*)
 (usocket:socket-close *sock2*)
+

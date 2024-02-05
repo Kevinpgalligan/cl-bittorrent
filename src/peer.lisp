@@ -2,9 +2,10 @@
 
 (in-package bittorrent)
 
-(defparameter *socket-buffer-size* 65507)
+(defparameter *handshake-timeout* 5)
 (defparameter *socket-wait-timeout* 0.2)
 (defparameter *queue-timeout* 0.2)
+(defparameter *id-num-bytes* 20)
 
 (define-condition ordered-to-close (condition) ())
 (define-condition failed-handshake (condition) ())
@@ -15,49 +16,28 @@
    (id :initarg :id :accessor id)))
 
 (defun random-peer-id ()
-  (coerce (loop repeat 20 collect (code-char (random 256)))
+  (coerce (loop repeat *id-num-bytes* collect (code-char (random 256)))
           'string))
 
 (defun peer-loop (torrent id receive-queue send-queue &key peer sock)
   (when (and (null peer) (null sock))
     (error "Need one of PEER or SOCK."))
-  (let ((socket-buffer (make-array *socket-buffer-size*
-                                   :element-type '(unsigned-byte 8)
-                                   :fill-pointer 0))
-        (msg-buff (make-message-buffer (num-pieces torrent))))
+  (let ((msg-buff (make-message-buffer (num-pieces torrent))))
     (handler-case
         (progn
           (when (null sock)
-            (setf sock (usocket:socket-connect (ip peer) (port peer))))
+            (setf sock (usocket:socket-connect (ip peer)
+                                               (port peer)
+                                               :timeout *socket-wait-timeout*)))
           (send-handshake torrent id sock)
-          (verify-handshake torrent peer sock socket-buffer)
-          (message-loop send-queue receive-queue sock msg-buff socket-buffer))
+          (verify-handshake torrent peer sock)
+          (message-loop send-queue receive-queue sock msg-buff))
       (condition (c)
         (when sock
           (usocket:socket-close sock))
         (qpush send-queue
                (queue-message :tag :shutdown
                               :contents (format nil "Closing due to: ~a" c)))))))
-
-;;; There's a problem: on serialising to the array, we assume there's a
-;;; fill pointer starting at 0, which is used to push bytes to the end of
-;;; the array. usocket uses the length of the array (determined by the
-;;; fill pointer) to determine the amount of data to read in (I think), so
-;;; we can't always set the fill pointer to 0 after using the array. So these
-;;; are some utility functions to handle the fill pointer on sending and
-;;; receiving data.
-(defun prepare-socket-buffer (socket-buffer)
-  (setf (fill-pointer socket-buffer) (array-total-size socket-buffer)))
-
-(defun clear-socket-buffer (socket-buffer)
-  (setf (fill-pointer socket-buffer) 0))
-
-(defun socket-buffer-receive (sock socket-buffer)
-  (prepare-socket-buffer socket-buffer)
-  (multiple-value-bind (buffer length)
-      (usocket:socket-receive sock socket-buffer nil)
-    (declare (ignorable buffer))
-    (setf (fill-pointer socket-buffer) length)))
 
 (defparameter *handshake-header*
   (concatenate 'vector
@@ -72,53 +52,47 @@
     (write-sequence (flexi-streams:string-to-octets id) stream)
     (force-output stream)))
 
-(defun verify-handshake (torrent peer sock socket-buffer)
-  (socket-buffer-receive sock socket-buffer)
-  (when (not (bytes-match? socket-buffer
-                           (list *handshake-header*
-                                 (info-hash torrent)
-                                 (id peer))))
-      (signal 'failed-handshake)))
+(defun verify-handshake (torrent peer sock)
+  (usocket:wait-for-input sock :timeout *handshake-timeout*)
+  (loop with stream = (usocket:socket-stream sock)
+        for x in (list *handshake-header*
+                       (info-hash torrent)
+                       (if peer (id peer) *id-num-bytes*))
+        do (if (integerp x)
+               (skip-bytes stream x)
+               (when (not (bytes-match? stream x))
+                 (signal 'failed-handshake)))))
 
-(defun bytes-match? (buffer bytes-and-strings)
-  (loop for i = 0
-        for x in bytes-and-strings
-        when (or (< (length buffer) (+ i (length x)))
-                 (mismatch buffer
-                           (if (stringp x) (flexi-streams:string-to-octets x) x)
-                           :start1 i
-                           :end1 (+ i (length x))))
-          do (return nil)
-        do (incf i (length x))
-        finally (return (= i (length buffer)))))
+(defun skip-bytes (stream n)
+  (loop repeat n do (read-byte stream)))
 
-(defun message-loop (send-queue receive-queue sock msg-buff socket-buffer)
-  (loop do (read-from-peer sock send-queue msg-buff socket-buffer)
-        do (execute-instructions receive-queue sock socket-buffer)))
+(defun bytes-match? (stream obj)
+  (let ((transf (if (stringp obj) #'char-code #'identity)))
+    (loop for x across obj
+          always (= (funcall transf x) (and (listen stream)
+                                            (read-byte stream))))))
 
-(defun read-from-peer (sock send-queue msg-buff socket-buffer)
-  (multiple-value-bind (ready-p time-remaining)
-      (usocket:wait-for-input sock :timeout *socket-wait-timeout*)
-    (declare (ignorable time-remaining))
-    (when ready-p
-      (loop for msg in (mb-store msg-buff
-                                 (usocket:socket-receive sock socket-buffer nil))
-            do (qpush send-queue
-                      (queue-message :tag :peer-message
-                                     :contents msg))))))
+(defun message-loop (send-queue receive-queue sock msg-buff)
+  (loop do (read-from-peer sock send-queue msg-buff)
+        do (execute-instructions receive-queue sock)))
 
-(defun execute-instructions (receive-queue sock socket-buffer)
+(defun read-from-peer (sock send-queue msg-buff)
+  (usocket:wait-for-input sock :timeout *socket-wait-timeout*)
+  (loop for msg in (mb-store msg-buff (usocket:socket-stream sock))
+        do (qpush send-queue
+                  (queue-message :tag :peer-message
+                                 :contents msg))))
+
+(defun execute-instructions (receive-queue sock)
   (loop for i = 0 then (1+ i)
-        for instruction = (qpop receive-queue (if (= 0 i)
-                                                  *queue-timeout*
-                                                  0))
+        for instruction = (qpop receive-queue
+                                (if (zerop i) *queue-timeout* 0))
         while instruction
-        do (handle-instruction instruction sock socket-buffer)))
+        do (handle-instruction instruction sock)))
 
-(defun handle-instruction (instruction sock socket-buffer)
+(defun handle-instruction (instruction sock)
   (case (tag instruction)
     (:shutdown (signal 'ordered-to-close))
     (:peer-message
-     (clear-socket-buffer socket-buffer)
-     (serialise-message (contents instruction) socket-buffer)
-     (usocket:socket-send sock socket-buffer (length socket-buffer)))))
+     (serialise-message (contents instruction) (usocket:socket-stream sock))
+     (force-output (usocket:socket-stream sock)))))
