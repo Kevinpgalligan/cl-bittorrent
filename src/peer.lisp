@@ -19,25 +19,26 @@
   (coerce (loop repeat *id-num-bytes* collect (code-char (random 256)))
           'string))
 
-(defun peer-loop (torrent id receive-queue send-queue &key peer sock)
-  (when (and (null peer) (null sock))
-    (error "Need one of PEER or SOCK."))
+(defun peer-loop (torrent id receive-queue send-queue peer-index &key peer sock)
   (let ((msg-buff (make-message-buffer (num-pieces torrent))))
     (handler-case
         (progn
+          (when (and (null peer) (null sock))
+            (error "Need one of PEER or SOCK."))
           (when (null sock)
             (setf sock (usocket:socket-connect (ip peer)
                                                (port peer)
                                                :timeout *socket-wait-timeout*)))
           (send-handshake torrent id sock)
           (verify-handshake torrent peer sock)
-          (message-loop send-queue receive-queue sock msg-buff))
+          (message-loop send-queue receive-queue sock msg-buff peer-index))
       (condition (c)
         (when sock
           (usocket:socket-close sock))
         (qpush send-queue
                (queue-message :tag :shutdown
-                              :contents (format nil "Closing due to: ~a" c)))))))
+                              :contents (format nil "Closing due to: ~a" c)
+                              :id peer-index))))))
 
 (defparameter *handshake-header*
   (concatenate 'vector
@@ -69,19 +70,21 @@
 (defun bytes-match? (stream obj)
   (let ((transf (if (stringp obj) #'char-code #'identity)))
     (loop for x across obj
-          always (= (funcall transf x) (and (listen stream)
-                                            (read-byte stream))))))
+          when (not (listen stream))
+            do (return nil)
+          always (= (funcall transf x) (read-byte stream)))))
 
-(defun message-loop (send-queue receive-queue sock msg-buff)
-  (loop do (read-from-peer sock send-queue msg-buff)
+(defun message-loop (send-queue receive-queue sock msg-buff peer-index)
+  (loop do (read-from-peer sock send-queue msg-buff peer-index)
         do (execute-instructions receive-queue sock)))
 
-(defun read-from-peer (sock send-queue msg-buff)
+(defun read-from-peer (sock send-queue msg-buff peer-index)
   (usocket:wait-for-input sock :timeout *socket-wait-timeout*)
   (loop for msg in (mb-store msg-buff (usocket:socket-stream sock))
         do (qpush send-queue
                   (queue-message :tag :peer-message
-                                 :contents msg))))
+                                 :contents msg
+                                 :id peer-index))))
 
 (defun execute-instructions (receive-queue sock)
   (loop for i = 0 then (1+ i)

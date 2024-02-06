@@ -21,7 +21,8 @@
 
 (defun query-tracker (torrent &key (port 6881) tracker-url
                                 peer-id verbose (event :started)
-                                (bytes-left (total-length torrent)))
+                                (bytes-left (total-length torrent))
+                                (uploaded 0))
   "Queries a tracker over HTTP. If no TRACKER-URL (string) is supplied, one
 is chosen randomly from the torrent. PORT is the port that is advertised to
 the tracker. PEER-ID is the 20-byte ID of the client; if not provided, a
@@ -29,18 +30,14 @@ random one is generated. If VERBOSE is true, prints stuff to standard output.
 Returns the response and the peer ID."
   (declare (type (tracker-event) event))
   (when (null tracker-url)
-    (let ((http-trackers (remove-if-not #'tracker-http-p
-                                        (tracker-list torrent))))
-      (when (null http-trackers)
-        (error "No HTTP trackers for this torrent!"))
-      (setf tracker-url (alexandria:random-elt http-trackers))
-      (when verbose
-        (format t "Using tracker: ~a~%" tracker-url))))
+    (setf tracker-url (random-http-tracker torrent)))
+  (when verbose
+    (format t "Using tracker: ~a~%" tracker-url))
   (when (not peer-id)
     (setf peer-id (random-peer-id)))
   (let ((bendata (send-http-request-to-tracker
-                  tracker-url torrent peer-id port event bytes-left
-                  :verbose verbose)))
+                  tracker-url torrent peer-id port event
+                  bytes-left uploaded :verbose verbose)))
     (values
      (make-instance 'tracker-response
                     :failure-reason (bencode:dict-get bendata "failure reason")
@@ -53,9 +50,18 @@ Returns the response and the peer ID."
                     :peers (parse-peers bendata))
      peer-id)))
 
-(defun send-http-request-to-tracker (url torrent peer-id port event bytes-left
+(defun random-http-tracker (torrent)
+  (let ((http-trackers (remove-if-not #'tracker-http-p
+                                      (tracker-list torrent))))
+    (when (null http-trackers)
+      (error "No HTTP trackers for this torrent!"))
+    (alexandria:random-elt http-trackers)))
+
+(defun send-http-request-to-tracker (url torrent peer-id port event
+                                     bytes-left uploaded
                                      &key verbose)
-  (let ((uri (make-tracker-uri url torrent peer-id port event bytes-left)))
+  (let ((uri (make-tracker-uri url torrent peer-id port event
+                               bytes-left uploaded)))
     (when verbose
       (format t "Requesting tracker: ~a~%" uri))
     ;; Must provide dex with the ':force-binary' option, as otherwise
@@ -66,7 +72,7 @@ Returns the response and the peer ID."
      (flexi-streams:octets-to-string
       (dex:get uri :force-binary t)))))
 
-(defun make-tracker-uri (url torrent peer-id port event bytes-left)
+(defun make-tracker-uri (url torrent peer-id port event bytes-left uploaded)
   ;; Rendering because I was getting 400 responses
   ;; when I used the URI object.
   (quri:render-uri
@@ -81,15 +87,19 @@ Returns the response and the peer ID."
     ;; it uses the default encoding (UTF-8) which will mess
     ;; up the bytestring parameters like info_hash.
     (quri:url-encode-params
-     (list
-      (cons "info_hash" (info-hash torrent))
-      (cons "peer_id" peer-id)
-      (cons "port" port)
-      (cons "uploaded" 0)
-      (cons "downloaded" 0)
-      (cons "left" bytes-left)
-      (cons "compact" 1)
-      (cons "event" (string-downcase (symbol-name event))))
+     (append
+      (list
+       (cons "info_hash" (info-hash torrent))
+       (cons "peer_id" peer-id)
+       (cons "port" port)
+       (cons "uploaded" uploaded)
+       (cons "downloaded" (- (total-length torrent) bytes-left))
+       (cons "left" bytes-left)
+       (cons "compact" 1))
+      (if event
+          (list
+           (cons "event" (string-downcase (symbol-name event))))
+          nil))
      :encoding :iso-8859-1))))
 
 (defun parse-peers (bendata)

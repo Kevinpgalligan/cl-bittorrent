@@ -20,4 +20,5 @@
                (:file "peer")
                (:file "tracker")
                (:file "piece")
+               (:file "client")
                ))
