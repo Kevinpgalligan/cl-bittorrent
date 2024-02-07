@@ -102,7 +102,7 @@ with other blocks, etc."
    (relative-end :initarg :relative-end :reader relative-end)
    (absolute-start :initarg :absolute-start :reader absolute-start)
    (absolute-end :initarg :absolute-end :reader absolute-end)
-   (length :initarg :length :reader length)))
+   (len :initarg :len :reader len)))
 
 (defun load-bytes-from-files (torrent start end)
   "Reads bytes from torrented files between START and END, which are indexes
@@ -110,10 +110,10 @@ into the torrent data when laid out contiguously on the file system. This
 range might include multiple files. Assumes that the files exist, which they
 should if the piece has been written there already."
   (let* ((frs (get-file-ranges torrent start end))
-         (buffer (make-array (reduce #'+ frs :key #'length :initial-value 0)
+         (buffer (make-array (reduce #'+ frs :key #'len :initial-value 0)
                              :element-type '(unsigned-byte))))
     (loop for fr in frs
-          for i = 0 then (+ i (length fr))
+          for i = 0 then (+ i (len fr))
           do (read-file-range-into-buffer fr buffer i))))
 
 (defun read-file-range-into-buffer (fr buffer buffer-ptr)
@@ -122,7 +122,7 @@ should if the piece has been written there already."
     (read-sequence buffer
                    stream
                    :start buffer-ptr
-                   :end (+ buffer-ptr (length fr)))))
+                   :end (+ buffer-ptr (len fr)))))
 
 (defun get-file-ranges (filespecs start end)
   (loop for filespec in filespecs
@@ -137,7 +137,7 @@ should if the piece has been written there already."
                                  :absolute-end file-end
                                  :relative-start (- (first overlap) file-start)
                                  :relative-end (- (second overlap) file-start)
-                                 :length (len filespec))))
+                                 :len (len filespec))))
 
 (defun ranges-overlap (s1 e1 s2 e2)
   "Returns '(start end) or nil. Starts are inclusive, ends exclusive."

@@ -19,7 +19,7 @@
   "Divides a piece up into blocks, returns a list of plists where
 each plist has :BEGIN and :LENGTH fields defining the (relative) start
 index of that block within the piece and the length of the block."
-  (with-accessors (piece-length total-length)
+  (with-slots (piece-length total-length)
       torrent
     (let ((start-index (* piece-length piece-index))
           (this-piece-length (min piece-length

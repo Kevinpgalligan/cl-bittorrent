@@ -62,7 +62,7 @@ terms of the number of 'choke update' intervals.")
    (listen-sock :initarg :listen-sock :reader listen-sock)
    (tracker-interval :initarg :tracker-interval :reader tracker-interval)
    (peers :initarg :peers :reader peers)
-   (peer-states :initarg :peer-states :reader peer-states)
+   (peer-states :initarg :peer-states :accessor peer-states)
    (index->peer-state :initarg :index->peer-state :reader index->peer-state)
    (next-peer-index :initarg :next-peer-index :accessor next-peer-index)
    (control-queue :initarg :control-queue :reader control-queue)
@@ -87,9 +87,9 @@ terms of the number of 'choke update' intervals.")
          (peer-states (loop for peer in peers
                             for index = 1 then (1+ index)
                             collect (make-peer-state torrent time-now index)))
-         (index->peer-states (make-hash-table)))
+         (index->peer-state (make-hash-table)))
     (loop for ps in peer-states
-          do (setf (gethash (index ps) index->peer-states) ps))
+          do (setf (gethash (index ps) index->peer-state) ps))
     (make-instance
      'client
      :id id
@@ -102,7 +102,7 @@ terms of the number of 'choke update' intervals.")
      :tracker-interval tracker-interval
      :peers peers
      :peer-states peer-states
-     :index->peer-states index->peer-states
+     :index->peer-state index->peer-state
      :next-index (1+ (length peers))
      :control-queue (make-queue)
      :last-update-time 0
@@ -120,7 +120,7 @@ terms of the number of 'choke update' intervals.")
   (make-instance 'download-state :uploaded 0 :downloaded 0))
 
 (defun get-peer-state (client index)
-  (gethash index (index->peer-states client)))
+  (gethash index (index->peer-state client)))
 
 (defun get-time-now ()
   (get-internal-real-time))
@@ -137,6 +137,8 @@ terms of the number of 'choke update' intervals.")
    (have-sent-p :initarg :have-sent-p :accessor have-sent-p)
    (uploaded-bytes :initarg :uploaded-bytes :accessor uploaded-bytes)
    (downloaded-bytes :initarg :downloaded-bytes :accessor downloaded-bytes)
+   (downloaded-bytes-sum :initarg :downloaded-bytes-sum
+                         :accessor downloaded-bytes-sum)
    (queue :initarg :queue :reader queue)
    (first-contact-p :initform t :accessor first-contact-p)))
 
@@ -170,11 +172,11 @@ terms of the number of 'choke update' intervals.")
         do (connect-to-new-peers client)))
 
 (defun spin-up-peer-threads (client)
-  (with-accessors (peers peer-states torrent id control-queue)
+  (with-slots (peers peer-states torrent id control-queue)
       client
     (loop for peer in peers 
           for ps in peer-states 
-          do (spin-up-peer-thread torrent id peer ps control-queue :peer peer))))
+          do (spin-up-peer-thread torrent id ps control-queue :peer peer))))
 
 (defun spin-up-peer-thread (torrent id peer-state control-queue &key peer sock)
   (bt:make-thread
@@ -192,7 +194,7 @@ terms of the number of 'choke update' intervals.")
              *max-idle-time*))
         (peer-states client))))
 
-(defun kill-peer (ps)
+(defun kill-peer (client ps)
   "Sends a message to the peer thread to shut down, and removes all
 state in the client associated with that peer."
   (shut-down-peer-thread ps)
@@ -222,8 +224,8 @@ state in the client associated with that peer."
      *choke-update-period*))
 
 (defun update-chokes (client)
-  (with-accessors (optimistic-unchoke-count optimistic-unchoke
-                   peer-states)
+  (with-slots (optimistic-unchoke-count optimistic-unchoke
+               peer-states)
       client
     (when (zerop optimistic-unchoke-count)
       ;; Time to update which peer we're optimistically unchoking.
@@ -242,7 +244,7 @@ state in the client associated with that peer."
                                          (if now-choked? :choke :unchoke))))))))
 
 (defun select-peers-to-unchoke (client)
-  (with-accessors (peer-states optimistic-unchoke)
+  (with-slots (peer-states optimistic-unchoke)
       client
     (let* ((most-generous (get-best-uploaders peer-states optimistic-unchoke)))
       (cons optimistic-unchoke most-generous))))
@@ -264,7 +266,7 @@ state in the client associated with that peer."
                                            :key #'index))))
                  (setf worst-download-amount
                        (downloaded-bytes-sum (find-worst-uploader best)))))
-    (maprcar #'index best)))
+    (mapcar #'index best)))
 
 (defun find-worst-uploader (list)
   (alexandria:extremum list #'< :key #'downloaded-bytes-sum))
@@ -275,11 +277,11 @@ state in the client associated with that peer."
   (update-transfer-rate ps 'downloaded-bytes 'downloaded-bytes-sum))
 
 (defun update-transfer-rate (ps bytes-slot &optional bytes-sum-slot)
-  (let ((last-val (car (last (slot-value bs bytes-slot)))))
+  (let ((last-val (car (last (slot-value :s bytes-slot)))))
     (when bytes-sum-slot
-      (decf (slot-value bs bytes-sum-slot) last-val)))
-  (setf (slot-value bs bytes-slot)
-        (cons 0 (butlast (slot-value bs bytes-slot)))))
+      (decf (slot-value ps bytes-sum-slot) last-val)))
+  (setf (slot-value ps bytes-slot)
+        (cons 0 (butlast (slot-value ps bytes-slot)))))
 
 (defun send-to-peer (peer-state message-id &optional data)
   (qpush (queue peer-state)
@@ -303,8 +305,8 @@ state in the client associated with that peer."
         (pending-messages client)))
 
 (defun maybe-ping-tracker (client)
-  (with-accessors (tracker-interval tracker-url torrent
-                   port last-tracker-ping downloaded-bytes uploaded-bytes)
+  (with-slots (tracker-interval tracker-url torrent
+               port last-tracker-ping downloaded-bytes uploaded-bytes)
       client
     (when (> (elapsed-time last-tracker-ping) tracker-interval)
       ;; Not currently using the tracker response for anything, let new
@@ -315,10 +317,13 @@ state in the client associated with that peer."
                      :bytes-left (- (total-length torrent) downloaded-bytes)
                      :uploaded uploaded-bytes))))
 
+(defun elapsed-time (timestamp)
+  (- (get-time-now) timestamp))
+
 (defun process-messages (client)
-  (with-accessors (control-queue)
+  (with-slots (control-queue)
       client
-    (loop for qmsg = (qpop control-queue :timeout *control-queue-timeout*)
+    (loop for qmsg = (qpop control-queue *control-queue-timeout*)
           while qmsg
           do (handle-ctrl-message client qmsg))))
 
@@ -337,21 +342,21 @@ the peer."
   ;; bootstrap the client.
   (setf (peer-states client)
         (remove peer-index (peer-states client) :key #'index))
-  (remhash (index ps) (index->peer-states client)))
+  (remhash peer-index (index->peer-state client)))
 
 (defun remove-outstanding-requests-for-peer (client peer-index)
   (setf (outstanding-requests client)
         (remove-if (lambda (req)
-                     (= (id qmsg) (peer-index req)))
+                     (= peer-index (peer-index req)))
                    (outstanding-requests client))))
 
 (defun find-outstanding-block-request (client peer-index piece-index
-                                       block-begin-index length)
+                                       block-begin-index len)
   (loop for req in (outstanding-requests client)
         when (and (= peer-index (peer-index req))
                   (= piece-index (piece-index req))
                   (= block-begin-index (block-begin-index req))
-                  (= length (length req)))
+                  (= len (len req)))
           do (return req)))
 
 (defun handle-peer-message (client peer-index msg)
@@ -374,7 +379,7 @@ the peer."
          (when (and (should-be-interested-p ps)
                     (not (interested ps)))
            (setf (interested ps) t)
-           (prepare-peer-message ps :interested)))
+           (prepare-peer-message client ps :interested)))
         ((eq id :request)
          ;; If they're choked we just drop the request.
          (when (and (not (choked ps))
@@ -395,7 +400,17 @@ the peer."
            (store-block client data)
            (let ((piece-index (getf data :index)))
              (when (has-piece-p client piece-index)
-               (prepare-peer-message :all :have piece-index)))))
+               ;; Let everyone know we have this piece now.
+               (prepare-peer-message client :all :have piece-index)
+               ;; Update whether we're interested in peers now.
+               (map nil
+                    (lambda (ps)
+                      (when (has-piece-p ps piece-index)
+                        (decf (num-desired-pieces ps))
+                        (when (zerop (num-desired-pieces ps))
+                          (setf (interested ps) nil)
+                          (prepare-peer-message client ps :not-interested))))
+                    (peer-states client))))))
         ((eq id :cancel)
          (setf (requests-list client)
                (remove (make-piece-request ps data)
@@ -409,25 +424,25 @@ the peer."
   (if (integerp x)
       (when (has-piece-p peer-state x)
         (mark-piece peer-state x)
-        (when (not (has-piece-p client))
+        (when (not (has-piece-p client x))
           (incf (num-desired-pieces peer-state))))
       ;; It's a bitfield, only allowed as the first message.
       (when (first-contact-p peer-state)
-        (set-piecemap client peer-state x))))
+        (set-piecemap peer-state x))))
 
 (defun has-piece-p (obj i)
-  (= 1 (bit (piecemap peer-state) i)))
+  (= 1 (bit (piecemap obj) i)))
 
 (defun mark-piece (obj i)
-  (setf (bit (piecemap peer-state) i) 1))
+  (setf (bit (piecemap obj) i) 1))
 
 (defun should-be-interested-p (peer-state)
   (> (num-desired-pieces peer-state) 0))
 
-(defun set-piecemap (client peer-state bitfield)
-  (bit-ior (piecemap peer-state) x t)
+(defun set-piecemap (peer-state bitfield)
+  (bit-ior (piecemap peer-state) bitfield t)
   (setf (num-desired-pieces peer-state)
-        (count-bits (bit-andc1 (piecemap client) x))))
+        (count-bits (piecemap peer-state))))
 
 (defun count-bits (bv)
   (loop for b across bv sum b))
@@ -436,7 +451,7 @@ the peer."
   ((peer-state :initarg :peer-state :reader peer-state)
    (index :initarg :index :reader index)
    (begin :initarg :begin :reader begin)
-   (length :initarg :length :reader length)))
+   (len :initarg :len :reader len)))
 
 (defun piece-request-eq (req1 req2)
   (and
@@ -445,21 +460,21 @@ the peer."
    (= (index (peer-state req1)) (index (peer-state req2)))
    (= (index req1) (index req2))
    (= (begin req1) (begin req2))
-   (= (length req1) (length req2))))
+   (= (len req1) (len req2))))
 
 (defun make-piece-request (ps request-data)
   (make-instance 'piece-request
                  :peer-state ps
                  :index (getf request-data :index)
                  :begin (getf request-data :begin)
-                 :length (getf request-data :length)))
+                 :len (getf request-data :length)))
 
 (defun add-to-requests-list (client ps request-data)
   (let ((req (make-piece-request ps request-data)))
-    (when (not (in-requests-list-p client ps req))
+    (when (not (in-requests-list-p client req))
       (push req (requests-list client)))))
 
-(defun in-requests-queue-p (client ps req)
+(defun in-requests-list-p (client req)
   (member req (requests-list client) :test #'piece-request-eq))
 
 (defun store-block (client block-data)
@@ -511,7 +526,7 @@ the peer."
   (setf (pending-messages client) nil))
 
 (defun send-requested-blocks (client)
-  (loop for req in requests-list
+  (loop for req in (requests-list client)
         do (send-requested-block client req)))
 
 (defun send-requested-block (client req)
@@ -519,7 +534,7 @@ the peer."
     (let ((b (load-bytes-from-files
               (torrent client)
               (begin req)
-              (+ (begin req) (length req)))))
+              (+ (begin req) (len req)))))
       (incf (uploaded-bytes client) (length b))
       (send-to-peer (peer-state req)
                     :piece
@@ -573,7 +588,7 @@ the peer."
         ;; for new pieces, if possible.
         (loop for i upto (num-pieces torrent)
               while available-peers
-              when (and (not (has-piece-p client))
+              when (and (not (has-piece-p client i))
                         (null (gethash i (partial-pieces client))))
                 do (loop with peers-with-piece = (get-peers-with-piece i)
                          while peers-with-piece
@@ -605,7 +620,7 @@ the peer."
    (piece-index :initarg :piece-index :reader piece-index)
    (block-begin-index :initarg :block-begin-index
                       :reader block-begin-index)
-   (length :initarg :length :reader length)
+   (len :initarg :len :reader len)
    (request-time :initarg :request-time :reader request-time)))
 
 (defun send-piece-request (client ps b)
@@ -644,11 +659,11 @@ the peer."
             do (send-to-peer ps :keep-alive))))
 
 (defun connect-to-new-peers (client)
-  (with-accessors (listen-sock torrent id control-queue next-peer-index)
+  (with-slots (listen-sock torrent id control-queue next-peer-index)
       client
     (when (usocket:wait-for-input listen-sock :timeout 0 :ready-only t)
       (let ((peer-state (make-peer-state torrent (get-time-now) next-peer-index)))
-        (add-peer-state client)
+        (add-peer-state client peer-state)
         (spin-up-peer-thread torrent
                              id
                              peer-state
@@ -658,8 +673,8 @@ the peer."
                                     :element-type '(unsigned-byte 8)))))))
 
 (defun add-peer-state (client ps)
-  (with-accessors (next-peer-index peer-states index->peer-states)
+  (with-slots (next-peer-index peer-states index->peer-state)
       client
     (incf next-peer-index)
     (push ps peer-states)
-    (setf (gethash (index ps) index->peer-states) ps)))
+    (setf (gethash (index ps) index->peer-state) ps)))
