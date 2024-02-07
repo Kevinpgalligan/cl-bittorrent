@@ -8,6 +8,9 @@
    (end :initarg :end :reader end)
    (bytes :initarg :bytes :reader bytes)))
 
+(defmethod size ((piece piece))
+  (- (end piece) (start piece)))
+
 (defun make-piece (index start end bytes)
   (make-instance 'piece :index index :start start :end end :bytes bytes))
 
@@ -47,17 +50,16 @@ that its start & end are in the appropriate range, that it doesn't overlap
 with other blocks, etc."
   (incf (bytecount partial-piece) (block-size blok))
   (with-slots (blocks) partial-piece
-    ;; Annoying. I'm sure there's a way to do this.
-    (cond
-      ((null blocks) (setf blocks (list blok)))
-      ((< (start blok) (start (first blocks)))
-       (setf blocks (cons blok blocks)))
-      (t (labels ((ins (current)
+    ;; Annoying. I'm sure this is implemented somewhere already.
+    (if (or (null blocks)
+            (< (start blok) (start (first blocks))))
+        (setf blocks (cons blok blocks))
+        (labels ((ins (current)
                     (if (or (null (cdr current))
                             (< (start blok) (start (cadr current))))
                         (setf (cdr current) (cons blok (cdr current)))
                         (ins (cdr current)))))
-           (ins blocks))))))
+           (ins blocks)))))
 
 (defun piece-ready-p (partial-piece)
   (= (bytecount partial-piece) (size partial-piece)))
@@ -76,37 +78,79 @@ with other blocks, etc."
 (defun valid-piece-p (expected-hash piece)
   (string= expected-hash (compute-sha1 (bytes piece))))
 
-(defun write-piece (piece files)
+(defun write-piece (piece filespecs)
   "Writes a piece to the filesystem in the appropriate file(s)."
-  (loop with rel-piece-pos = 0 ; pointer within piece
-        ;; pointers across all torrent bytes
-        with piece-pos = (start piece)
-        with pos = 0
-        while (< piece-pos (end piece))
-        for file in files
-        when (< piece-pos (+ pos (len file)))
-          do (progn
-               (incf rel-piece-pos (write-to-file piece
-                                                  file
-                                                  rel-piece-pos
-                                                  (- piece-pos pos)))
-               (setf piece-pos (+ rel-piece-pos (start piece))))
-        do (incf pos (len file))))
+  (loop for fr in (get-file-ranges filespecs (start piece) (end piece))
+        do (write-to-file-range fr piece)))
 
-(defun write-to-file (piece file rel-piece-pos file-pos)
-  "Returns how many bytes were written.
-REL-PIECE-POS is the relative position within the bytes of the piece, from
-0 to NumBytesInPiece-1. FILE-POS is the position to write within the file, from
-0 to NumBytesInFile-1."
-  (with-open-file (fstream
-                   (path file)
+(defun write-to-file-range (fr piece)
+  (with-open-file (stream
+                   (path fr)
                    :direction :output
                    :element-type '(unsigned-byte 8))
-    (file-position fstream file-pos)
-    (let ((num-bytes (min (- (len file) file-pos)
-                          (- (end piece) rel-piece-pos))))
-      (write-sequence (bytes piece)
-                      fstream
-                      :start rel-piece-pos
-                      :end (+ rel-piece-pos num-bytes))
-      num-bytes)))
+    (file-position stream (relative-start fr))
+    (write-sequence (bytes piece)
+                    stream
+                    ;; These give the relative indexes within the piece
+                    ;; that we want to write to this part of the file.
+                    :start (- (absolute-start fr) (start piece))
+                    :end (- (absolute-end fr) (start piece)))))
+
+(defclass file-range ()
+  ((path :initarg :path :reader path)
+   (relative-start :initarg :relative-start :reader relative-start)
+   (relative-end :initarg :relative-end :reader relative-end)
+   (absolute-start :initarg :absolute-start :reader absolute-start)
+   (absolute-end :initarg :absolute-end :reader absolute-end)
+   (length :initarg :length :reader length)))
+
+(defun load-bytes-from-files (torrent start end)
+  "Reads bytes from torrented files between START and END, which are indexes
+into the torrent data when laid out contiguously on the file system. This
+range might include multiple files. Assumes that the files exist, which they
+should if the piece has been written there already."
+  (let* ((frs (get-file-ranges torrent start end))
+         (buffer (make-array (reduce #'+ frs :key #'length :initial-value 0)
+                             :element-type '(unsigned-byte))))
+    (loop for fr in frs
+          for i = 0 then (+ i (length fr))
+          do (read-file-range-into-buffer fr buffer i))))
+
+(defun read-file-range-into-buffer (fr buffer buffer-ptr)
+  (with-open-file (stream (path fr) :element-type '(unsigned-byte 8))
+    (file-position stream (relative-start fr))
+    (read-sequence buffer
+                   stream
+                   :start buffer-ptr
+                   :end (+ buffer-ptr (length fr)))))
+
+(defun get-file-ranges (filespecs start end)
+  (loop for filespec in filespecs
+        for file-start = 0 then (+ file-start (len filespec))
+        while (< file-start end)
+        for file-end = (+ file-start (len filespec))
+        for overlap = (ranges-overlap file-start file-end start end)
+        when overlap
+          collect (make-instance 'file-range
+                                 :path (path filespec)
+                                 :absolute-start file-start
+                                 :absolute-end file-end
+                                 :relative-start (- (first overlap) file-start)
+                                 :relative-end (- (second overlap) file-start)
+                                 :length (len filespec))))
+
+(defun ranges-overlap (s1 e1 s2 e2)
+  "Returns '(start end) or nil. Starts are inclusive, ends exclusive."
+  (let ((overlap
+          (cond
+            ((and (<= s1 s2) (<= e2 e1))
+             (list s2 e2))
+            ((and (<= s2 s1) (<= e1 e2))
+             (list s1 e1))
+            ((and (<= s1 s2) (<= s2 e1))
+             (list s2 e1))
+            ((and (<= s1 e2) (<= e2 e1))
+             (list s1 e2)))))
+    (if (and overlap (= (first overlap) (second overlap)))
+        nil
+        overlap)))

@@ -6,7 +6,7 @@
 (defsystem bittorrent
   :license "MIT"
   :author "Kevin Galligan"
-  :description "Implementation of the BitTorrent protocol."
+  :description "A BitTorrent client."
   :depends-on (:esrap :trees :usocket :dexador
                :quri :sha1 :str :flexi-streams
                :bordeaux-threads :lparallel)

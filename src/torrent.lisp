@@ -2,6 +2,9 @@
 
 (in-package bittorrent)
 
+;; Chosen to be the same as the max request size.
+(defparameter *max-block-size* 16384)
+
 (defclass torrent ()
   ((metainfo :initarg :metainfo :accessor metainfo)
    (tracker-list :initarg :tracker-list :accessor tracker-list)
@@ -11,6 +14,24 @@
    (total-length :initarg :total-length :accessor total-length)
    (piece-length :initarg :piece-length :reader piece-length)
    (piece-hashes :initarg :piece-hashes :reader piece-hashes)))
+
+(defun all-blocks (torrent piece-index)
+  "Divides a piece up into blocks, returns a list of plists where
+each plist has :BEGIN and :LENGTH fields defining the (relative) start
+index of that block within the piece and the length of the block."
+  (with-accessors (piece-length total-length)
+      torrent
+    (let ((start-index (* piece-length piece-index))
+          (this-piece-length (min piece-length
+                                  (- total-length start-index))))
+      (loop for relative-i = 0 then (+ relative-i *max-block-size*)
+            for absolute-i = (+ relative-i start-index)
+            while (and (< relative-i piece-length)
+                       (< absolute-i total-length))
+            collect (list :piece-index piece-index
+                          :begin relative-i
+                          :length (min *max-block-size*
+                                       (- total-length absolute-i)))))))
 
 (defmethod num-pieces ((instance torrent))
   (length (piece-hashes instance)))
@@ -22,6 +43,12 @@
 
 (defun make-filespec (name len path)
   (make-instance 'filespec :name name :len len :path path))
+
+(defun add-base-path (base-path filespec)
+  (setf (path filespec)
+        (uiop:merge-pathnames*
+         (name filespec)
+         (uiop:merge-pathnames* (path filespec) base-path))))
 
 (defun extract-tracker-list (metainfo)
   (if (bencode:dict-has metainfo "announce-list")
@@ -52,12 +79,14 @@
       (flet ((extract-filespec (raw)
                (make-filespec (bencode:dict-get raw "name")
                               (bencode:dict-get raw "length")
-                              (bencode:dict-get raw "path"))))
+                              (str:trim-left
+                               (or (bencode:dict-get raw "path") "")
+                               :char-bag '(#\/)))))
         (mapcar #'extract-filespec (bencode:dict-get info "files")))
       (list (make-filespec (bencode:dict-get info "name")
                            (bencode:dict-get info "length")
                            ;; No path provided for a single file.
-                           nil))))
+                           ""))))
 
 (defun extract-piece-hashes (metainfo)
   (let ((raw-hashes (bencode:dict-get metainfo "info" "pieces")))

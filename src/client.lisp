@@ -10,12 +10,18 @@ terms of the number of 'choke update' intervals.")
 (defparameter *control-queue-timeout* 0.1)
 (defparameter *max-idle-time*
   (* internal-time-units-per-second 120))
+(defparameter *piece-request-timeout*
+  (* internal-time-units-per-second 120))
+
+(defparameter *max-concurrent-piece-requests* 4)
 
 (defun download-torrent (torrent-path download-path)
   (let* ((torrent (load-torrent-file torrent-path))
          (base-path (uiop:merge-pathnames* (dirname torrent) download-path))
          (piecemap (make-array (num-pieces torrent) :element-type 'bit))
          (tracker-url (random-http-tracker torrent)))
+    (loop for filespec in (files torrent)
+          do (add-base-path base-path filespec))
     (multiple-value-bind (listen-sock port) (attempt-open-bittorrent-socket)
       (multiple-value-bind (tracker-response peer-id)
           (query-tracker torrent
@@ -60,13 +66,20 @@ terms of the number of 'choke update' intervals.")
    (index->peer-state :initarg :index->peer-state :reader index->peer-state)
    (next-peer-index :initarg :next-peer-index :accessor next-peer-index)
    (control-queue :initarg :control-queue :reader control-queue)
-   (last-update-time :initarg :last-update-time :accessor last-update-time)
+   (last-update-time :initarg :last-update-time :accessor last-update-time
+                     ;; Could change the name rather than writing docs and writing
+                     ;; this comment, but oh well.
+                     :documentation "Last time we updated which peers to choke.")
    (last-tracker-ping :initarg :last-tracker-ping :accessor last-tracker-ping)
    (optimistic-unchoke :initarg :optimistic-unchoke :accessor optimistic-unchoke)
    (optimistic-unchoke-count :initarg :optimistic-unchoke-count
                              :accessor optimistic-unchoke-count)
-   (downloaded-bytes :initarg :downloaded-bytes :reader downloaded-bytes)
-   (uploaded-bytes :initarg :uploaded-bytes :reader uploaded-bytes)))
+   (downloaded-bytes :initarg :downloaded-bytes :accessor downloaded-bytes)
+   (uploaded-bytes :initarg :uploaded-bytes :accessor uploaded-bytes)
+   (requests-list :initarg :requests-list :accessor requests-list)
+   (pending-messages :initarg :pending-messages :accessor pending-messages)
+   (partial-pieces :initarg :partial-pieces :reader partial-pieces)
+   (outstanding-requests :initarg :outstanding-requests :accessor outstanding-requests)))
 
 (defun make-client (id torrent port base-path tracker-url
                     piecemap listen-sock tracker-interval peers)
@@ -97,7 +110,11 @@ terms of the number of 'choke update' intervals.")
      :optimistic-unchoke nil
      :optimistic-unchoke-count 0
      :downloaded-bytes 0
-     :uploaded-bytes 0)))
+     :uploaded-bytes 0
+     :requests-list nil
+     :pending-messages nil
+     :partial-pieces (make-hash-table)
+     :outstanding-requests nil)))
 
 (defun make-download-state ()
   (make-instance 'download-state :uploaded 0 :downloaded 0))
@@ -115,7 +132,9 @@ terms of the number of 'choke update' intervals.")
    (they-interested :initarg :they-interested :accessor they-interested)
    (piecemap :initarg :piecemap :accessor piecemap)
    (num-desired-pieces :initarg :num-desired-pieces :accessor num-desired-pieces)
-   (last-contact-time :initarg :last-contact-time :accessor last-contact-time)
+   (last-receive-time :initarg :last-receive-time :accessor last-receive-time)
+   (last-send-time :initarg :last-send-time :accessor last-send-time)
+   (have-sent-p :initarg :have-sent-p :accessor have-sent-p)
    (uploaded-bytes :initarg :uploaded-bytes :accessor uploaded-bytes)
    (downloaded-bytes :initarg :downloaded-bytes :accessor downloaded-bytes)
    (queue :initarg :queue :reader queue)
@@ -130,7 +149,9 @@ terms of the number of 'choke update' intervals.")
                  :they-interested nil
                  :piecemap (make-array (num-pieces torrent) :element-type 'bit)
                  :num-desired-pieces 0
-                 :last-contact-time time-now
+                 :last-receive-time time-now
+                 :last-send-time time-now
+                 :have-sent-p nil
                  :uploaded-bytes (loop repeat *rolling-transfer-window*
                                        collect 0)
                  :downloaded-bytes (loop repeat *rolling-transfer-window*
@@ -139,19 +160,14 @@ terms of the number of 'choke update' intervals.")
                  :queue (make-queue)))
 
 (defun client-loop (client)
-  (handler-case
-      (progn
-        (spin-up-peer-threads client)
-        (loop do (prune-idle-peers client)
-              do (maybe-update-chokes client)
-              do (maybe-ping-tracker client)
-              do (process-messages client)
-              do (send-piece-requests client)
-              do (connect-to-new-peers client)))
-    (condition (c)
-      ;; TODO allow user to specify action.
-      (shut-down-peer-threads client)
-      (signal c))))
+  (spin-up-peer-threads client)
+  (loop do (prune-idle-peers client)
+        do (prune-timed-out-piece-requests client)
+        do (maybe-update-chokes client)
+        do (maybe-ping-tracker client)
+        do (process-messages client)
+        do (send-peer-messages client)
+        do (connect-to-new-peers client)))
 
 (defun spin-up-peer-threads (client)
   (with-accessors (peers peer-states torrent id control-queue)
@@ -172,7 +188,7 @@ terms of the number of 'choke update' intervals.")
          (kill-peer client ps))
        (remove-if
         (lambda (ps)
-          (< (- (get-time-now) (last-contact-time ps))
+          (< (- (get-time-now) (last-receive-time ps))
              *max-idle-time*))
         (peer-states client))))
 
@@ -187,6 +203,14 @@ state in the client associated with that peer."
 
 (defun shut-down-peer-thread (peer-state)
   (qpush (queue peer-state) (queue-message :tag :shutdown)))
+
+(defun prune-timed-out-piece-requests (client)
+  (let ((now (get-time-now)))
+    (setf (outstanding-requests client)
+          (remove-if (lambda (req)
+                       (> (- now (request-time req))
+                          *piece-request-timeout*))
+                     (outstanding-requests client)))))
 
 (defun maybe-update-chokes (client)
   (when (time-to-update? client)
@@ -213,9 +237,9 @@ state in the client associated with that peer."
                  (setf (choked ps) now-choked?)
                  (when changed?
                    ;; Let the peer know their new status.
-                   (send-to-peer ps
-                                 (if now-choked? :choke :unchoke)
-                                 nil)))))))
+                   (prepare-peer-message client
+                                         ps
+                                         (if now-choked? :choke :unchoke))))))))
 
 (defun select-peers-to-unchoke (client)
   (with-accessors (peer-states optimistic-unchoke)
@@ -261,7 +285,22 @@ state in the client associated with that peer."
   (qpush (queue peer-state)
          (queue-message :tag :peer-message
                         :contents (make-message :id message-id
-                                                :data data))))
+                                                :data data)))
+  (setf (last-send-time peer-state) (get-time-now))
+  (setf (have-sent-p peer-state) t))
+
+(defclass pending-peer-message ()
+  ((target :initarg :target :reader target
+           :documentation "Can be a peer-state or the keyword symbol :ALL.")
+   (message-id :initarg :message-id :reader message-id)
+   (data :initarg :data :reader data)))
+
+(defun prepare-peer-message (client target message-id &optional data)
+  (push (make-instance 'pending-peer-message
+                       :target target
+                       :message-id message-id
+                       :data data)
+        (pending-messages client)))
 
 (defun maybe-ping-tracker (client)
   (with-accessors (tracker-interval tracker-url torrent
@@ -288,7 +327,9 @@ state in the client associated with that peer."
 the control queue. These can just be forwards of messages from
 the peer."
   (case (tag qmsg)
-    (:shutdown (remove-peer-state client (id qmsg)))
+    (:shutdown
+     (remove-peer-state client (id qmsg))
+     (remove-outstanding-requests-for-peer client (id qmsg)))
     (:peer-message (handle-peer-message client (id qmsg) (contents qmsg)))))
 
 (defun remove-peer-state (client peer-index)
@@ -298,12 +339,34 @@ the peer."
         (remove peer-index (peer-states client) :key #'index))
   (remhash (index ps) (index->peer-states client)))
 
+(defun remove-outstanding-requests-for-peer (client peer-index)
+  (setf (outstanding-requests client)
+        (remove-if (lambda (req)
+                     (= (id qmsg) (peer-index req)))
+                   (outstanding-requests client))))
+
+(defun find-outstanding-block-request (client peer-index piece-index
+                                       block-begin-index length)
+  (loop for req in (outstanding-requests client)
+        when (and (= peer-index (peer-index req))
+                  (= piece-index (piece-index req))
+                  (= block-begin-index (block-begin-index req))
+                  (= length (length req)))
+          do (return req)))
+
 (defun handle-peer-message (client peer-index msg)
+  ;; Some comments to help my future self. DATA here is basically the payload
+  ;; of a message from a peer. Right now it's a plist, the fields of which depend
+  ;; on the message type but should hopefully have obvious names from the
+  ;; standard / should be gleanable from the message-parsing. Here, we don't
+  ;; send any messages to peers, we just queue up messages for later.
   (with-slots (id data) msg
     (let ((ps (get-peer-state client peer-index)))
       (cond
         ((member id '(:choke :unchoke))
-         (setf (they-choking ps) (eq id :choke)))
+         (setf (they-choking ps) (eq id :choke))
+         (when (they-choking ps)
+           (remove-outstanding-requests-for-peer client (index ps))))
         ((member id '(:interested :not-interested))
          (setf (they-interested ps) (eq id :interested)))
         ((member id '(:have :bitfield))
@@ -311,28 +374,36 @@ the peer."
          (when (and (should-be-interested-p ps)
                     (not (interested ps)))
            (setf (interested ps) t)
-           (send-to-peer ps :interested)))
+           (prepare-peer-message ps :interested)))
         ((eq id :request)
-         ;; TODO hmmm
-         ;; if choked, drop
-         ;; otherwise, dedupe
-         ;;    and add to list
-         ;; actual sending can occur in what is now called
-         ;; SEND-PIECE-REQUESTS, maybe? That will allow some buffering.
-         ;; Would also need to move the FLUSH in the peer thread until
-         ;; after all queue messages have been processed.
-         )
+         ;; If they're choked we just drop the request.
+         (when (and (not (choked ps))
+                    (has-piece-p client (getf data :index))
+                    (not (> (getf data :length) *max-request-size*)))
+           (add-to-requests-list client ps data)))
         ((eq id :piece)
-         ;; TODO accumulate it / write it
-         ;; when entire piece written, let peers know if uninterested.
-         )
+         ;; If we didn't request it, ignore.
+         (alexandria:when-let
+             ((req (find-outstanding-block-request
+                    client
+                    (index ps)
+                    (getf data :index)
+                    (getf data :begin)
+                    (getf data :length))))
+           (setf (outstanding-requests client)
+                 (remove req (outstanding-requests client)))
+           (store-block client data)
+           (let ((piece-index (getf data :index)))
+             (when (has-piece-p client piece-index)
+               (prepare-peer-message :all :have piece-index)))))
         ((eq id :cancel)
-         ;; TODO maybe group this with :request
-         )
-        )
+         (setf (requests-list client)
+               (remove (make-piece-request ps data)
+                       (requests-list client)
+                       :test #'piece-request-eq))))
       (setf (first-contact-p ps) nil)
       ;; Ignoring keep-alive messages but they do still have this effect.
-      (setf (last-contact-time ps) (get-time-now)))))
+      (setf (last-receive-time ps) (get-time-now)))))
 
 (defun update-piecemaps (client peer-state x)
   (if (integerp x)
@@ -361,13 +432,216 @@ the peer."
 (defun count-bits (bv)
   (loop for b across bv sum b))
 
-(defun send-piece-requests (client)
-  ;; TODO
-  ;; torrent piecemap peer-states
-  ;; 1. send requests
-  ;; 2. send keepalives
-  ;; 3. send blocks that they requested
-  )
+(defclass piece-request ()
+  ((peer-state :initarg :peer-state :reader peer-state)
+   (index :initarg :index :reader index)
+   (begin :initarg :begin :reader begin)
+   (length :initarg :length :reader length)))
+
+(defun piece-request-eq (req1 req2)
+  (and
+   ;; The peer index is different from the piece index. Bad
+   ;; naming, perhaps.
+   (= (index (peer-state req1)) (index (peer-state req2)))
+   (= (index req1) (index req2))
+   (= (begin req1) (begin req2))
+   (= (length req1) (length req2))))
+
+(defun make-piece-request (ps request-data)
+  (make-instance 'piece-request
+                 :peer-state ps
+                 :index (getf request-data :index)
+                 :begin (getf request-data :begin)
+                 :length (getf request-data :length)))
+
+(defun add-to-requests-list (client ps request-data)
+  (let ((req (make-piece-request ps request-data)))
+    (when (not (in-requests-list-p client ps req))
+      (push req (requests-list client)))))
+
+(defun in-requests-queue-p (client ps req)
+  (member req (requests-list client) :test #'piece-request-eq))
+
+(defun store-block (client block-data)
+  (with-slots (torrent) client
+    (let* ((b (make-block (getf block-data :index)
+                          (getf block-data :begin)
+                          (getf block-data :block)))
+           (partial-piece (gethash (index b) (partial-pieces client)))
+           (piece-start (* (index b) (piece-length torrent))))
+      (when (null partial-piece)
+        (setf partial-piece
+              (make-partial-piece (index b)
+                                  piece-start
+                                  (min (+ piece-start (piece-length torrent))
+                                       (total-length torrent))))
+        (setf (gethash (index b) (partial-pieces client)) partial-piece))
+      (block-insert partial-piece b)
+      (pop-and-write-piece-if-ready client partial-piece))))
+
+(defun pop-and-write-piece-if-ready (client partial-piece)
+  (when (piece-ready-p partial-piece)
+    (remhash (piece-index partial-piece) (partial-pieces client))
+    (let ((piece (stitch-together-piece partial-piece))
+          (torrent (torrent client)))
+      (when (valid-piece-p (nth (index piece) (piece-hashes torrent)) piece)
+        (write-piece piece (files torrent))
+        (incf (downloaded-bytes client) (size piece))
+        (mark-piece client (index piece))))))
+
+(defun send-peer-messages (client)
+  ;; Putting this first allows us to send the bitfield as our first
+  ;; message, which is the only time it's allowed.
+  (send-proactive-messages client)
+  (send-pending-messages client)
+  (send-requested-blocks client)
+  (send-keepalives client))
+
+(defun send-pending-messages (client)
+  (loop for msg in (pending-messages client)
+        do (flet ((send (peer-state)
+                    ;; I think it's okay to not copy the data, since the
+                    ;; peer threads shouldn't mutate it.
+                    (send-to-peer peer-state (message-id msg) (data msg))))
+             (if (eq :all (target msg))
+                 ;; Send to all peers!
+                 (map nil #'send (peer-states client))
+                 ;; It's a peer-state, just send to this peer.
+                 (send (target msg)))))
+  (setf (pending-messages client) nil))
+
+(defun send-requested-blocks (client)
+  (loop for req in requests-list
+        do (send-requested-block client req)))
+
+(defun send-requested-block (client req)
+  (with-slots (torrent) client
+    (let ((b (load-bytes-from-files
+              (torrent client)
+              (begin req)
+              (+ (begin req) (length req)))))
+      (incf (uploaded-bytes client) (length b))
+      (send-to-peer (peer-state req)
+                    :piece
+                    (list :index (index req)
+                          :begin (begin req)
+                          :block b)))))
+
+(defun send-proactive-messages (client)
+  "Messages that aren't responses to messages from peers."
+  ;; We can only send the bitfield as our first message to
+  ;; a peer, but no point sending it if we don't have any pieces.
+  (when (not (zerop (downloaded-bytes client)))
+    (loop for ps in (peer-states client)
+          when (not (have-sent-p ps))
+            do (send-to-peer ps :bitfield (piecemap client))))
+  ;; Now request pieces!
+  (with-slots (torrent) client
+    (let ((available-peers (get-available-peers client)))
+      (labels ((get-peers-with-piece (piece-index)
+                 (remove-if (lambda (ps)
+                              (not (has-piece-p ps piece-index)))
+                            available-peers))
+               (remove-peer-state (list index)
+                 (remove index list :key #'index))
+               (remove-available! (ps)
+                 (setf available-peers
+                       (remove-peer-state available-peers (index ps)))))
+        ;; Prioritise the pieces that are already in progress, since having
+        ;; full pieces lets us share them with others and get unchoked.
+        (loop for partial-piece being the hash-values of (partial-pieces client)
+                using (hash-key piece-index)
+              while available-peers
+              for peers-with-piece = (get-peers-with-piece (index partial-piece))
+              ;; Check for outstanding requests. Find the next block
+              ;; for this piece that doesn't have an outstanding request. Then
+              ;; request it from a random peer that has the piece.
+              do (loop while peers-with-piece
+                       for b in (remaining-blocks client partial-piece)
+                       ;; We have available peers with this piece - request data!
+                       ;; Ugly duplication that I'm not sure how to get rid of.
+                       ;; A function doesn't work 'cause it can't setf
+                       ;; peers-with-pieces.
+                       do (let ((ps (alexandria:random-elt peers-with-piece)))
+                            (send-piece-request client ps b)
+                            (when (max-capacity-p ps)
+                              (remove-available! ps)
+                              (setf peers-with-piece
+                                    (remove-peer-state peers-with-piece
+                                                       (index ps)))))))
+        ;; If there are still available peers, send them requests
+        ;; for new pieces, if possible.
+        (loop for i upto (num-pieces torrent)
+              while available-peers
+              when (and (not (has-piece-p client))
+                        (null (gethash i (partial-pieces client))))
+                do (loop with peers-with-piece = (get-peers-with-piece i)
+                         while peers-with-piece
+                         for b in (remove-if
+                                   (lambda (b)
+                                     (request-outstanding-p
+                                      client i (getf b :begin)))
+                                   (all-blocks torrent i))
+                         ;; Ugly duplication.
+                         do (let ((ps (alexandria:random-elt peers-with-piece)))
+                              (send-piece-request client ps b)
+                              (when (max-capacity-p ps)
+                                (remove-available! ps)
+                                (setf peers-with-piece
+                                      (remove-peer-state peers-with-piece
+                                                         (index ps)))))))))))
+
+(defun get-available-peers (client)
+  (remove-if (lambda (ps)
+               (or (they-choking ps)
+                   (max-capacity-p ps)))
+             (peer-states client)))
+
+(defun max-capacity-p (ps)
+  (> (length (outstanding-requests ps)) *max-concurrent-piece-requests*))
+
+(defclass outstanding-request ()
+  ((peer-index :initarg :peer-index :reader peer-index)
+   (piece-index :initarg :piece-index :reader piece-index)
+   (block-begin-index :initarg :block-begin-index
+                      :reader block-begin-index)
+   (length :initarg :length :reader length)
+   (request-time :initarg :request-time :reader request-time)))
+
+(defun send-piece-request (client ps b)
+  (send-to-peer ps
+                :request
+                (list :index (getf b :piece-index)
+                      :begin (getf b :begin)
+                      :length (getf b :length)))
+  (push (make-instance 'outstanding-request
+                       :peer-index (index ps)
+                       :piece-index (getf b :piece-index)
+                       :block-begin-index (getf b :begin)
+                       :length (getf b :length)
+                       :request-time (get-time-now))
+        (outstanding-requests client)))
+
+(defun remaining-blocks (client partial-piece)
+  (flet ((accumulated-or-outstanding-p (b)
+           (or
+            (find (getf b :begin) (blocks partial-piece) :key #'start)
+            (request-outstanding-p client
+                                   (piece-index partial-piece)
+                                   (getf b :begin)))))
+    (remove-if #'accumulated-or-outstanding-p
+               (all-blocks (torrent client) (piece-index partial-piece)))))
+
+(defun request-outstanding-p (client piece-index block-begin-index)
+  (loop for req in (outstanding-requests client)
+          thereis (and (= piece-index (piece-index req))
+                       (= block-begin-index (block-begin-index req)))))
+
+(defun send-keepalives (client)
+  (let ((now (get-time-now)))
+    (loop for ps in (peer-states client)
+          when (> (- now (last-send-time ps)) *max-idle-time*)
+            do (send-to-peer ps :keep-alive))))
 
 (defun connect-to-new-peers (client)
   (with-accessors (listen-sock torrent id control-queue next-peer-index)

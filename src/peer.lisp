@@ -76,7 +76,12 @@
 
 (defun message-loop (send-queue receive-queue sock msg-buff peer-index)
   (loop do (read-from-peer sock send-queue msg-buff peer-index)
-        do (execute-instructions receive-queue sock)))
+        do (execute-instructions receive-queue sock)
+           ;; Leaving this until after all the instructions have
+           ;; been executed leaves the opportunity for buffering
+           ;; messages and sending them all at once, but in practice
+           ;; we're not doing that right now.
+        do (force-output (usocket:socket-stream sock))))
 
 (defun read-from-peer (sock send-queue msg-buff peer-index)
   (usocket:wait-for-input sock :timeout *socket-wait-timeout*)
@@ -97,5 +102,4 @@
   (case (tag instruction)
     (:shutdown (signal 'ordered-to-close))
     (:peer-message
-     (serialise-message (contents instruction) (usocket:socket-stream sock))
-     (force-output (usocket:socket-stream sock)))))
+     (serialise-message (contents instruction) (usocket:socket-stream sock)))))

@@ -1,12 +1,13 @@
 ### Description
-My implementation of the BitTorrent protocol in Common Lisp.
+A BitTorrent client in Common Lisp.
 
-Nice extensions that I'll probably never do:
+The minimum additions to make this actually useful:
 
+* Test it with multi-file torrents.
 * Pausing and resuming of downloads.
-* Resilience to e.g. dropped connections, failed file writes, etc.
+* Resilience to errors: dropped connections, failed file writes, unresponsive tracker, etc.
 * Smarter selection of pieces for download (e.g. rarest first).
-* UDP communication with trackers.
+* UDP communication with trackers (currently only the old HTTP version).
 * Figure out a better way to read bytes from the usocket stream (not one at a time).
 
 ### Setup
@@ -19,7 +20,10 @@ Then:
 ```
 
 ### Usage
-TODO
+```lisp
+(in-package bittorrent)
+(download-torrent "/path/to/file.torrent" "/path/to/downloads/")
+```
 
 ### Testing
 For unit tests:
@@ -30,7 +34,7 @@ For unit tests:
 (run! 'bittorrent) ; runs all fiveam tests
 ```
 
-There are multithreading tests in the `scripts/` folder.
+There are multithreading tests in the `scripts/` folder that I run using `slime-eval-buffer` in Emacs.
 
 ### Resources
 * <http://www.kristenwidman.com/blog/how-to-write-a-bittorrent-client-part-1/>

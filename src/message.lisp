@@ -2,8 +2,8 @@
 
 (in-package bittorrent)
 
-;; 16384 bytes is the standard max request size, but leaving some
-;; breathing room here.
+(defparameter *max-request-size* 16384)
+;; Leaving some breathing room here.
 (defparameter *message-buff-size* 18000)
 (defparameter *len-field-bytes* 4)
 

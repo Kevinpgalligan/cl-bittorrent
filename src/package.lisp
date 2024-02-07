@@ -1,6 +1,10 @@
 (defpackage :bittorrent
   (:use :cl)
   (:export
+   :download-torrent
+
+   ;; These are only exported for testing. I'm sure
+   ;; there's a better way to do that, though.
    :make-message-buffer
    :mb-store
    :make-message
