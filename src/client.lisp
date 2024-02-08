@@ -20,37 +20,46 @@ terms of the number of 'choke update' intervals.")
          (base-path (uiop:merge-pathnames* (dirname torrent) download-path))
          (piecemap (make-array (num-pieces torrent) :element-type 'bit))
          (tracker-url (random-http-tracker torrent)))
-    (loop for filespec in (files torrent)
-          do (add-base-path base-path filespec))
-    (multiple-value-bind (listen-sock port) (attempt-open-bittorrent-socket)
-      (multiple-value-bind (tracker-response peer-id)
-          (query-tracker torrent
-                         :port port
-                         :tracker-url tracker-url
-                         :event :started)
-        (when (warning-message tracker-response)
-          (format t "Tracker warning: ~a~%" (warning-message tracker-response)))
-        (cond
-          ((failure-reason tracker-response)
-           (format t "Failed to contact tracker: ~a~%"
-                   (failure-reason tracker-response)))
-          (t
-           (client-loop
-            (make-client peer-id torrent port base-path tracker-url
-                         piecemap listen-sock
-                         (interval tracker-response)
-                         (peers tracker-response)))))))))
+    (log:info "Loaded torrent with info hash: ~a" (info-hash torrent))
+    (log:info "Querying tracker: ~a" tracker-url)
+    (multiple-value-bind (listen-sock port)
+        (attempt-open-bittorrent-socket)
+      (when (null listen-sock)
+        (error "Couldn't find a free port in the range 6881-6889."))
+      (log:info "Listening on port: ~a" port)
+      (unwind-protect
+           (multiple-value-bind (tracker-response peer-id)
+               (query-tracker torrent
+                              :port port
+                              :tracker-url tracker-url
+                              :event :started)
+             (when (warning-message tracker-response)
+               (log:warn "Tracker warning: ~a" (warning-message tracker-response)))
+             (cond
+               ((failure-reason tracker-response)
+                (log:error "Tracker returned failure: ~a"
+                           (failure-reason tracker-response)))
+               (t
+                (log:info "Received ~a peers from tracker."
+                          (length (peers tracker-response)))
+                (client-loop
+                 (make-client peer-id torrent port base-path tracker-url
+                              piecemap listen-sock
+                              (interval tracker-response)
+                              (peers tracker-response))))))
+        (when listen-sock
+          (usocket:socket-close listen-sock))))))
 
 (defun attempt-open-bittorrent-socket ()
-  (or
-   (loop for port from 6881 below 6890
-         for sock = (handler-case (usocket:socket-listen
-                                   "127.0.0.1" port :element-type 'flexi-streams:octet)
-                      (usocket:address-in-use-error ()
-                        nil))
-         when sock
-           do (return (values sock port)))
-   (error "Couldn't find a free port in the range 6881-6889.")))
+  (loop for port from 6881 below 6890
+        for sock = (handler-case
+                       (usocket:socket-listen
+                        "127.0.0.1" port :element-type 'flexi-streams:octet)
+                     (condition (c)
+                       (log:info
+                        "Couldn't connect to port ~a because: ~a" port c)))
+        when sock
+          do (return (values sock port))))
 
 (defclass client ()
   ((id :initarg :id :reader id)
@@ -79,7 +88,8 @@ terms of the number of 'choke update' intervals.")
    (requests-list :initarg :requests-list :accessor requests-list)
    (pending-messages :initarg :pending-messages :accessor pending-messages)
    (partial-pieces :initarg :partial-pieces :reader partial-pieces)
-   (outstanding-requests :initarg :outstanding-requests :accessor outstanding-requests)))
+   (outstanding-requests :initarg :outstanding-requests
+                         :accessor outstanding-requests)))
 
 (defun make-client (id torrent port base-path tracker-url
                     piecemap listen-sock tracker-interval peers)
@@ -99,11 +109,13 @@ terms of the number of 'choke update' intervals.")
      :tracker-url tracker-url
      :piecemap piecemap
      :listen-sock listen-sock
-     :tracker-interval tracker-interval
+     ;; Need to convert from seconds (unit used by tracker) to
+     ;; units used by our clock.
+     :tracker-interval (* internal-time-units-per-second tracker-interval)
      :peers peers
      :peer-states peer-states
      :index->peer-state index->peer-state
-     :next-index (1+ (length peers))
+     :next-peer-index (1+ (length peers))
      :control-queue (make-queue)
      :last-update-time 0
      :last-tracker-ping time-now
@@ -126,7 +138,8 @@ terms of the number of 'choke update' intervals.")
   (get-internal-real-time))
 
 (defclass peer-state ()
-  ((choked :initarg :choked :accessor choked)
+  ((index :initarg :index :reader index)
+   (choked :initarg :choked :accessor choked)
    (they-choking :initarg :they-choking :accessor they-choking)
    (interested :initarg :interested :accessor interested)
    (they-interested :initarg :they-interested :accessor they-interested)
@@ -162,14 +175,19 @@ terms of the number of 'choke update' intervals.")
                  :queue (make-queue)))
 
 (defun client-loop (client)
+  (log:info "Creating peer threads.")
   (spin-up-peer-threads client)
-  (loop do (prune-idle-peers client)
-        do (prune-timed-out-piece-requests client)
-        do (maybe-update-chokes client)
-        do (maybe-ping-tracker client)
-        do (process-messages client)
-        do (send-peer-messages client)
-        do (connect-to-new-peers client)))
+  (log:info "Entering client loop.")
+  (unwind-protect
+       (loop do (prune-idle-peers client)
+             do (prune-timed-out-piece-requests client)
+             do (maybe-update-chokes client)
+             do (maybe-ping-tracker client)
+             do (process-messages client)
+             do (send-peer-messages client)
+             do (connect-to-new-peers client))
+    (log:info "Exiting client loop and shutting down peer threads.")
+    (shut-down-peer-threads client)))
 
 (defun spin-up-peer-threads (client)
   (with-slots (peers peer-states torrent id control-queue)
@@ -187,6 +205,7 @@ terms of the number of 'choke update' intervals.")
 (defun prune-idle-peers (client)
   (map nil
        (lambda (ps)
+         (log:info "Killing idle peer, index ~a" (index ps))
          (kill-peer client ps))
        (remove-if
         (lambda (ps)
@@ -207,16 +226,27 @@ state in the client associated with that peer."
   (qpush (queue peer-state) (queue-message :tag :shutdown)))
 
 (defun prune-timed-out-piece-requests (client)
-  (let ((now (get-time-now)))
+  (let* ((now (get-time-now))
+         (timed-out-reqs
+           (find-if (lambda (req)
+                      (> (- now (request-time req))
+                         *piece-request-timeout*))
+                    (outstanding-requests client))))
+    (loop for req in timed-out-reqs
+          do (log:info "Pruning timed-out piece request: ~a ~a ~a ~a"
+                       (peer-index req)
+                       (piece-index req)
+                       (block-begin-index req)
+                       (request-time req)))
     (setf (outstanding-requests client)
-          (remove-if (lambda (req)
-                       (> (- now (request-time req))
-                          *piece-request-timeout*))
+          (remove-if (lambda (req) (member req timed-out-reqs))
                      (outstanding-requests client)))))
 
 (defun maybe-update-chokes (client)
   (when (time-to-update? client)
+    (log:info "Updating chokes!")
     (update-chokes client)
+    (setf (last-update-time client) (get-time-now))
     (incf (optimistic-unchoke-count client))))
 
 (defun time-to-update? (client)
@@ -227,11 +257,13 @@ state in the client associated with that peer."
   (with-slots (optimistic-unchoke-count optimistic-unchoke
                peer-states)
       client
-    (when (zerop optimistic-unchoke-count)
+    (when (and peer-states (zerop optimistic-unchoke-count))
       ;; Time to update which peer we're optimistically unchoking.
       (setf optimistic-unchoke 
             (index (alexandria:random-elt peer-states))))
+    (log:info "Optimistically unchoking: ~a" optimistic-unchoke)
     (let ((next-unchoked (select-peers-to-unchoke client)))
+      (log:info "Unchoke list: ~a" next-unchoked)
       (loop for ps in peer-states
             do (update-transfer-rates ps)
             do (let* ((now-choked? (not (member (index ps) next-unchoked)))
@@ -246,8 +278,8 @@ state in the client associated with that peer."
 (defun select-peers-to-unchoke (client)
   (with-slots (peer-states optimistic-unchoke)
       client
-    (let* ((most-generous (get-best-uploaders peer-states optimistic-unchoke)))
-      (cons optimistic-unchoke most-generous))))
+    (append (get-best-uploaders peer-states optimistic-unchoke)
+            (and optimistic-unchoke (list optimistic-unchoke)))))
 
 (defun get-best-uploaders (peer-states optimistic-unchoke)
   (let ((best nil)
@@ -284,6 +316,10 @@ state in the client associated with that peer."
         (cons 0 (butlast (slot-value ps bytes-slot)))))
 
 (defun send-to-peer (peer-state message-id &optional data)
+  ;; Would like to log the data but not sure how to avoid dumping a massive
+  ;; payload to the log, there's a way to limit how much to print.
+  (log:info "Sending ~a message to peer ~a"
+            message-id (index peer-state))
   (qpush (queue peer-state)
          (queue-message :tag :peer-message
                         :contents (make-message :id message-id
@@ -309,13 +345,18 @@ state in the client associated with that peer."
                port last-tracker-ping downloaded-bytes uploaded-bytes)
       client
     (when (> (elapsed-time last-tracker-ping) tracker-interval)
+      (log:info "Pinging the tracker.")
+      (setf last-tracker-ping (get-time-now))
       ;; Not currently using the tracker response for anything, let new
       ;; peers be the ones to connect to us.
-      (query-tracker torrent
-                     :port port
-                     :tracker-url tracker-url
-                     :bytes-left (- (total-length torrent) downloaded-bytes)
-                     :uploaded uploaded-bytes))))
+      (handler-case
+          (query-tracker torrent
+                         :port port
+                         :tracker-url tracker-url
+                         :bytes-left (- (total-length torrent) downloaded-bytes)
+                         :uploaded uploaded-bytes)
+        (condition (c)
+          (log:warn "Error when pinging tracker: ~a" c))))))
 
 (defun elapsed-time (timestamp)
   (- (get-time-now) timestamp))
@@ -333,9 +374,12 @@ the control queue. These can just be forwards of messages from
 the peer."
   (case (tag qmsg)
     (:shutdown
+     (log:info "Peer thread ~a is shutting down with message -- ~a."
+               (id qmsg) (contents qmsg))
      (remove-peer-state client (id qmsg))
      (remove-outstanding-requests-for-peer client (id qmsg)))
-    (:peer-message (handle-peer-message client (id qmsg) (contents qmsg)))))
+    (:peer-message
+     (handle-peer-message client (id qmsg) (contents qmsg)))))
 
 (defun remove-peer-state (client peer-index)
   ;; Don't need to update PEERS, since that's only used to
@@ -366,6 +410,7 @@ the peer."
   ;; standard / should be gleanable from the message-parsing. Here, we don't
   ;; send any messages to peers, we just queue up messages for later.
   (with-slots (id data) msg
+    (log:info "Received ~a message from peer ~a" id peer-index)
     (let ((ps (get-peer-state client peer-index)))
       (cond
         ((member id '(:choke :unchoke))
@@ -400,6 +445,7 @@ the peer."
            (store-block client data)
            (let ((piece-index (getf data :index)))
              (when (has-piece-p client piece-index)
+               (log:info "Finished piece ~a." piece-index)
                ;; Let everyone know we have this piece now.
                (prepare-peer-message client :all :have piece-index)
                ;; Update whether we're interested in peers now.
@@ -491,6 +537,8 @@ the peer."
                                   (min (+ piece-start (piece-length torrent))
                                        (total-length torrent))))
         (setf (gethash (index b) (partial-pieces client)) partial-piece))
+      (log:info "Storing block ~a-~a for piece ~a"
+                (start b) (+ (start b) (length (bytes b))) (piece-index b))
       (block-insert partial-piece b)
       (pop-and-write-piece-if-ready client partial-piece))))
 
@@ -499,10 +547,15 @@ the peer."
     (remhash (piece-index partial-piece) (partial-pieces client))
     (let ((piece (stitch-together-piece partial-piece))
           (torrent (torrent client)))
-      (when (valid-piece-p (nth (index piece) (piece-hashes torrent)) piece)
-        (write-piece piece (files torrent))
-        (incf (downloaded-bytes client) (size piece))
-        (mark-piece client (index piece))))))
+      (log:info "Piece ~a fully downloaded, checking hash." (index piece))
+      (if (valid-piece-p (nth (index piece) (piece-hashes torrent)) piece)
+          (progn
+            (log:info "Valid hash, storing.")
+            (write-piece piece (files torrent))
+            (log:info "Piece stored successfully.")
+            (incf (downloaded-bytes client) (size piece))
+            (mark-piece client (index piece)))
+          (log:warn "Piece ~a failed hash check, discarding." (index piece))))))
 
 (defun send-peer-messages (client)
   ;; Putting this first allows us to send the bitfield as our first
@@ -662,15 +715,17 @@ the peer."
   (with-slots (listen-sock torrent id control-queue next-peer-index)
       client
     (when (usocket:wait-for-input listen-sock :timeout 0 :ready-only t)
-      (let ((peer-state (make-peer-state torrent (get-time-now) next-peer-index)))
+      (let ((peer-state (make-peer-state torrent (get-time-now) next-peer-index))
+            (sock (usocket:socket-accept
+                   listen-sock
+                   :element-type '(unsigned-byte 8))))
         (add-peer-state client peer-state)
+        (log:info "Connected with new peer (index ~a)" (index peer-state))
         (spin-up-peer-thread torrent
                              id
                              peer-state
                              control-queue
-                             :sock (usocket:socket-accept
-                                    listen-sock
-                                    :element-type '(unsigned-byte 8)))))))
+                             :sock sock)))))
 
 (defun add-peer-state (client ps)
   (with-slots (next-peer-index peer-states index->peer-state)

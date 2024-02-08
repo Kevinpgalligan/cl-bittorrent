@@ -17,38 +17,31 @@
 
 (defun all-blocks (torrent piece-index)
   "Divides a piece up into blocks, returns a list of plists where
-each plist has :BEGIN and :LENGTH fields defining the (relative) start
+each plist has :BEGIN and :LENGTH fields indicating the (relative) start
 index of that block within the piece and the length of the block."
   (with-slots (piece-length total-length)
       torrent
-    (let ((start-index (* piece-length piece-index))
-          (this-piece-length (min piece-length
-                                  (- total-length start-index))))
+    (let* ((start-index (* piece-length piece-index))
+           (this-piece-length (min piece-length
+                                   (- total-length start-index))))
       (loop for relative-i = 0 then (+ relative-i *max-block-size*)
-            for absolute-i = (+ relative-i start-index)
-            while (and (< relative-i piece-length)
-                       (< absolute-i total-length))
+            while (< relative-i this-piece-length)
             collect (list :piece-index piece-index
                           :begin relative-i
-                          :length (min *max-block-size*
-                                       (- total-length absolute-i)))))))
+                          :length this-piece-length)))))
 
 (defmethod num-pieces ((instance torrent))
   (length (piece-hashes instance)))
 
 (defclass filespec ()
-  ((name :initarg :name :reader name)
-   (len :initarg :len :reader len)
-   (path :initarg :path :reader path)))
+  ((path :initarg :path :accessor path)
+   (len :initarg :len :reader len)))
 
-(defun make-filespec (name len path)
-  (make-instance 'filespec :name name :len len :path path))
+(defun make-filespec (path len)
+  (make-instance 'filespec :path path :len len))
 
 (defun add-base-path (base-path filespec)
-  (setf (path filespec)
-        (uiop:merge-pathnames*
-         (name filespec)
-         (uiop:merge-pathnames* (path filespec) base-path))))
+  (setf (path filespec) (uiop:merge-pathnames* (path filespec) base-path)))
 
 (defun extract-tracker-list (metainfo)
   (if (bencode:dict-has metainfo "announce-list")
@@ -76,17 +69,18 @@ index of that block within the piece and the length of the block."
 
 (defun extract-files (metainfo info)
   (if (multifile-mode-p metainfo)
-      (flet ((extract-filespec (raw)
-               (make-filespec (bencode:dict-get raw "name")
-                              (bencode:dict-get raw "length")
-                              (str:trim-left
-                               (or (bencode:dict-get raw "path") "")
-                               :char-bag '(#\/)))))
-        (mapcar #'extract-filespec (bencode:dict-get info "files")))
+      (let ((dir (concatenate 'string
+                              (bencode:dict-get info "name")
+                              "/")))
+        (mapcar (lambda (raw-filespec)
+                  (make-filespec
+                   (uiop:merge-pathnames*
+                    (str:join "/" (bencode:dict-get raw-filespec "path"))
+                    dir)
+                   (bencode:dict-get raw-filespec "length")))
+                (bencode:dict-get info "files")))
       (list (make-filespec (bencode:dict-get info "name")
-                           (bencode:dict-get info "length")
-                           ;; No path provided for a single file.
-                           ""))))
+                           (bencode:dict-get info "length")))))
 
 (defun extract-piece-hashes (metainfo)
   (let ((raw-hashes (bencode:dict-get metainfo "info" "pieces")))

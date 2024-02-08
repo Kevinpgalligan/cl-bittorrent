@@ -7,7 +7,7 @@ The minimum additions to make this actually useful:
 * Pausing and resuming of downloads.
 * Resilience to errors: dropped connections, failed file writes, unresponsive tracker, etc.
 * Smarter selection of pieces for download (e.g. rarest first).
-* UDP communication with trackers (currently only the old HTTP version).
+* UDP communication with trackers (currently uses the old HTTP protocol, which most trackers don't accept anymore).
 * Figure out a better way to read bytes from the usocket stream (not one at a time).
 
 ### Setup

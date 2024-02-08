@@ -9,7 +9,7 @@
   :description "A BitTorrent client."
   :depends-on (:esrap :trees :usocket :dexador
                :quri :sha1 :str :flexi-streams
-               :bordeaux-threads :lparallel)
+               :bordeaux-threads :lparallel :log4cl)
   :pathname "src"
   :serial t
   :components ((:file "package")
@@ -20,5 +20,5 @@
                (:file "peer")
                (:file "tracker")
                (:file "piece")
-               ;(:file "client")
+               (:file "client")
                ))

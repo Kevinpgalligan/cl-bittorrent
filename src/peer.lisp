@@ -15,6 +15,9 @@
    (port :initarg :port :accessor port)
    (id :initarg :id :accessor id)))
 
+(defmethod print-object ((instance peer) stream)
+  (format stream "#<PEER ~a:~a>" (ip instance) (port instance)))
+
 (defun random-peer-id ()
   (coerce (loop repeat *id-num-bytes* collect (code-char (random 256)))
           'string))
