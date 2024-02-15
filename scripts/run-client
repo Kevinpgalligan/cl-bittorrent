@@ -1,0 +1,42 @@
+#!/usr/bin/sbcl --script
+
+(format t "Loading packages.~%")
+
+(load "~/.sbclrc")
+(ql:quickload 'unix-opts)
+(ql:quickload 'bittorrent)
+
+(in-package bittorrent)
+
+(opts:define-opts
+  (:name :help
+   :description "Print this help text."
+   :short #\h
+   :long "help")
+ (:name :torrent
+  :help "Torrent file to download."
+  :arg-parser #'identity
+  :short #\t
+  :long "torrent")
+ (:name :dir
+  :help "Where to download the files to."
+  :arg-parser #'identity
+  :short #\d
+  :long "dir"))
+
+(format t "Parsing command-line options.~%")
+
+
+(multiple-value-bind (options free-args)
+    (opts:get-opts)
+  (when (or (getf options :help)
+            (not (getf options :torrent))
+            (not (getf options :dir)))
+    (opts:describe
+     :usage-of "run-client"
+     :args "[FREE-ARGS]")
+    (quit))
+  (format t "Torrent: ~a~%" (getf options :torrent))
+  (format t "Download Directory: ~a~%" (getf options :dir))
+  (format t "Running client.~%")
+  (download-torrent (getf options :torrent) (getf options :dir)))

@@ -13,7 +13,8 @@
    (files :initarg :files :reader files)
    (total-length :initarg :total-length :accessor total-length)
    (piece-length :initarg :piece-length :reader piece-length)
-   (piece-hashes :initarg :piece-hashes :reader piece-hashes)))
+   (piece-hashes :initarg :piece-hashes :reader piece-hashes)
+   (num-pieces :initarg :num-pieces :reader num-pieces)))
 
 (defun all-blocks (torrent piece-index)
   "Divides a piece up into blocks, returns a list of plists where
@@ -29,9 +30,6 @@ index of that block within the piece and the length of the block."
             collect (list :piece-index piece-index
                           :begin relative-i
                           :length this-piece-length)))))
-
-(defmethod num-pieces ((instance torrent))
-  (length (piece-hashes instance)))
 
 (defclass filespec ()
   ((path :initarg :path :accessor path)
@@ -52,7 +50,8 @@ index of that block within the piece and the length of the block."
   "Loads and parses a bencoded .torrent file."
   (let* ((metainfo (bencode:bdecode (read-torrent-to-string path)))
          (info (bencode:dict-get metainfo "info"))
-         (files (extract-files metainfo info)))
+         (files (extract-files metainfo info))
+         (hashes (extract-piece-hashes metainfo)))
     (make-instance 'torrent
                    :metainfo metainfo
                    :tracker-list (extract-tracker-list metainfo)
@@ -62,7 +61,8 @@ index of that block within the piece and the length of the block."
                    :files files
                    :total-length (reduce #'+ (mapcar #'len files) :initial-value 0)
                    :piece-length (bencode:dict-get info "piece length")
-                   :piece-hashes (extract-piece-hashes metainfo))))
+                   :piece-hashes hashes
+                   :num-pieces (length hashes))))
 
 (defun multifile-mode-p (metainfo)
   (not (bencode:dict-has metainfo "info" "length")))

@@ -61,7 +61,9 @@
   (loop with stream = (usocket:socket-stream sock)
         for x in (list *handshake-header*
                        (info-hash torrent)
-                       (if peer (id peer) *id-num-bytes*))
+                       (if (and peer (not (null (id peer))))
+                           (id peer)
+                           *id-num-bytes*))
         do (if (integerp x)
                (skip-bytes stream x)
                (when (not (bytes-match? stream x))

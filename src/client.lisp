@@ -15,10 +15,14 @@ terms of the number of 'choke update' intervals.")
 
 (defparameter *max-concurrent-piece-requests* 4)
 
-(defun download-torrent (torrent-path download-path)
+(defun download-torrent (torrent-path download-path &optional start-piecemap)
+  "Start torrenting based on file at TORRENT-PATH, files are saved to
+base directory DOWNLOAD-PATH. PIECEMAP is a bit vector specifying which
+pieces have already been downloaded, if any."
   (let* ((torrent (load-torrent-file torrent-path))
          (base-path (uiop:merge-pathnames* (dirname torrent) download-path))
-         (piecemap (make-array (num-pieces torrent) :element-type 'bit))
+         (piecemap (or start-piecemap
+                       (make-array (num-pieces torrent) :element-type 'bit)))
          (tracker-url (random-http-tracker torrent)))
     (log:info "Loaded torrent with info hash: ~a" (info-hash torrent))
     (log:info "Querying tracker: ~a" tracker-url)
@@ -40,6 +44,8 @@ terms of the number of 'choke update' intervals.")
                 (log:error "Tracker returned failure: ~a"
                            (failure-reason tracker-response)))
                (t
+                (log:info "Using peer ID (URL-encoded): ~a"
+                          (quri:url-encode peer-id))
                 (log:info "Received ~a peers from tracker."
                           (length (peers tracker-response)))
                 (client-loop
@@ -83,13 +89,17 @@ terms of the number of 'choke update' intervals.")
    (optimistic-unchoke :initarg :optimistic-unchoke :accessor optimistic-unchoke)
    (optimistic-unchoke-count :initarg :optimistic-unchoke-count
                              :accessor optimistic-unchoke-count)
-   (downloaded-bytes :initarg :downloaded-bytes :accessor downloaded-bytes)
+   (downloaded-bytes :initarg :downloaded-bytes
+                     :accessor downloaded-bytes)
    (uploaded-bytes :initarg :uploaded-bytes :accessor uploaded-bytes)
    (requests-list :initarg :requests-list :accessor requests-list)
    (pending-messages :initarg :pending-messages :accessor pending-messages)
    (partial-pieces :initarg :partial-pieces :reader partial-pieces)
    (outstanding-requests :initarg :outstanding-requests
-                         :accessor outstanding-requests)))
+                         :accessor outstanding-requests)
+   (pieces-downloaded :initarg :pieces-downloaded :accessor pieces-downloaded)
+   (download-complete-p :initarg :download-complete-p
+                        :accessor download-complete-p)))
 
 (defun make-client (id torrent port base-path tracker-url
                     piecemap listen-sock tracker-interval peers)
@@ -97,7 +107,8 @@ terms of the number of 'choke update' intervals.")
          (peer-states (loop for peer in peers
                             for index = 1 then (1+ index)
                             collect (make-peer-state torrent time-now index)))
-         (index->peer-state (make-hash-table)))
+         (index->peer-state (make-hash-table))
+         (num-pieces-already (count-bits piecemap)))
     (loop for ps in peer-states
           do (setf (gethash (index ps) index->peer-state) ps))
     (make-instance
@@ -126,7 +137,9 @@ terms of the number of 'choke update' intervals.")
      :requests-list nil
      :pending-messages nil
      :partial-pieces (make-hash-table)
-     :outstanding-requests nil)))
+     :outstanding-requests nil
+     :pieces-downloaded num-pieces-already
+     :download-complete-p (= num-pieces-already (num-pieces torrent)))))
 
 (defun make-download-state ()
   (make-instance 'download-state :uploaded 0 :downloaded 0))
@@ -150,10 +163,15 @@ terms of the number of 'choke update' intervals.")
    (have-sent-p :initarg :have-sent-p :accessor have-sent-p)
    (uploaded-bytes :initarg :uploaded-bytes :accessor uploaded-bytes)
    (downloaded-bytes :initarg :downloaded-bytes :accessor downloaded-bytes)
-   (downloaded-bytes-sum :initarg :downloaded-bytes-sum
-                         :accessor downloaded-bytes-sum)
    (queue :initarg :queue :reader queue)
    (first-contact-p :initform t :accessor first-contact-p)))
+
+(defmethod downloaded-bytes-sum ((ps peer-state))
+  "How many bytes we've downloaded from this peer in the rolling window."
+  (apply #'+ (downloaded-bytes ps)))
+
+(defmethod uploaded-bytes-sum ((ps peer-state))
+  (apply #'+ (uploaded-bytes ps)))
 
 (defun make-peer-state (torrent time-now index)
   (make-instance 'peer-state
@@ -171,7 +189,6 @@ terms of the number of 'choke update' intervals.")
                                        collect 0)
                  :downloaded-bytes (loop repeat *rolling-transfer-window*
                                          collect 0)
-                 :downloaded-bytes-sum 0
                  :queue (make-queue)))
 
 (defun client-loop (client)
@@ -276,44 +293,48 @@ state in the client associated with that peer."
                                          (if now-choked? :choke :unchoke))))))))
 
 (defun select-peers-to-unchoke (client)
-  (with-slots (peer-states optimistic-unchoke)
+  (with-slots (peer-states optimistic-unchoke download-complete-p)
       client
-    (append (get-best-uploaders peer-states optimistic-unchoke)
+    (append (get-best-peers peer-states optimistic-unchoke download-complete-p)
             (and optimistic-unchoke (list optimistic-unchoke)))))
 
-(defun get-best-uploaders (peer-states optimistic-unchoke)
+(defun get-best-peers (peer-states optimistic-unchoke download-complete-p)
   (let ((best nil)
-        (worst-download-amount 0))
+        (sum-to-optimise
+          (if download-complete-p
+              #'uploaded-bytes-sum
+              #'downloaded-bytes-sum))
+        (worst-amount 0))
     (loop for ps in peer-states
           ;; Exclude the optimistic unchoke from the selection.
           when (and (not (= (index ps) optimistic-unchoke))
                     (or (< (length best) *peers-to-unchoke*)
-                        (> (downloaded-bytes-sum ps) worst-download-amount)))
+                        (> (funcall sum-to-optimise ps) worst-amount)))
             do (progn
                  (push ps best)
                  (when (> (length best) *peers-to-unchoke*)
-                   (let ((worst-index (index (find-worst-uploader best))))
+                   (let ((worst-index (index (find-worst-uploader best sum-to-optimise))))
                      (setf best (remove-if (lambda (i) (= i worst-index))
                                            best
                                            :key #'index))))
-                 (setf worst-download-amount
-                       (downloaded-bytes-sum (find-worst-uploader best)))))
+                 (setf worst-amount
+                       (funcall sum-to-optimise
+                                (find-worst-uploader best sum-to-optimise)))))
     (mapcar #'index best)))
 
-(defun find-worst-uploader (list)
-  (alexandria:extremum list #'< :key #'downloaded-bytes-sum))
+(defun find-worst-uploader (list sum-to-optimise)
+  (alexandria:extremum list #'< :key sum-to-optimise))
 
 (defun update-transfer-rates (ps)
   "Upload and download rates are tracked in a rolling window, this updates them."
   (update-transfer-rate ps 'uploaded-bytes)
-  (update-transfer-rate ps 'downloaded-bytes 'downloaded-bytes-sum))
+  (update-transfer-rate ps 'downloaded-bytes))
 
-(defun update-transfer-rate (ps bytes-slot &optional bytes-sum-slot)
-  (let ((last-val (car (last (slot-value :s bytes-slot)))))
-    (when bytes-sum-slot
-      (decf (slot-value ps bytes-sum-slot) last-val)))
-  (setf (slot-value ps bytes-slot)
-        (cons 0 (butlast (slot-value ps bytes-slot)))))
+(defun update-transfer-rate (ps bytes-slot)
+  (when (>= (length (slot-value ps bytes-slot))
+            *rolling-transfer-window*)
+    (setf (slot-value ps bytes-slot)
+          (cons 0 (butlast (slot-value ps bytes-slot))))))
 
 (defun send-to-peer (peer-state message-id &optional data)
   ;; Would like to log the data but not sure how to avoid dumping a massive
@@ -446,6 +467,10 @@ the peer."
            (let ((piece-index (getf data :index)))
              (when (has-piece-p client piece-index)
                (log:info "Finished piece ~a." piece-index)
+               (incf (pieces-downloaded client))
+               (when (= (pieces-downloaded client)
+                        (num-pieces (torrent client)))
+                 (setf (download-complete-p client) t))
                ;; Let everyone know we have this piece now.
                (prepare-peer-message client :all :have piece-index)
                ;; Update whether we're interested in peers now.
@@ -627,9 +652,6 @@ the peer."
               do (loop while peers-with-piece
                        for b in (remaining-blocks client partial-piece)
                        ;; We have available peers with this piece - request data!
-                       ;; Ugly duplication that I'm not sure how to get rid of.
-                       ;; A function doesn't work 'cause it can't setf
-                       ;; peers-with-pieces.
                        do (let ((ps (alexandria:random-elt peers-with-piece)))
                             (send-piece-request client ps b)
                             (when (max-capacity-p ps)
@@ -650,7 +672,9 @@ the peer."
                                      (request-outstanding-p
                                       client i (getf b :begin)))
                                    (all-blocks torrent i))
-                         ;; Ugly duplication.
+                         ;; Ugly duplication that I'm not sure how to get rid of.
+                         ;; A function doesn't work 'cause it can't setf
+                         ;; peers-with-pieces.
                          do (let ((ps (alexandria:random-elt peers-with-piece)))
                               (send-piece-request client ps b)
                               (when (max-capacity-p ps)

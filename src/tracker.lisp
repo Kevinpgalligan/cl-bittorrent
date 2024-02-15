@@ -114,6 +114,8 @@ Returns the response and the peer ID."
         collect (make-instance 'peer
                                :ip (bencode:dict-get peer "ip")
                                :port (bencode:dict-get peer "port")
+                               ;; Potential bug: I'm not sure if this
+                               ;; is URL-encoded.
                                :id (bencode:dict-get peer "peer id"))))
   
 (defun parse-peers-from-bytestring (string)
@@ -123,7 +125,8 @@ Returns the response and the peer ID."
     (loop while (flexi-streams:peek-byte bytestream nil nil)
           collect (make-instance 'peer
                                  :ip (read-ip bytestream)
-                                 :port (read-port bytestream)))))
+                                 :port (read-port bytestream)
+                                 :id nil))))
 
 (defun read-ip (bytestream)
   (let ((ip (make-array '(4) :element-type '(unsigned-byte 8))))
