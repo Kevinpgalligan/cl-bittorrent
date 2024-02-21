@@ -103,10 +103,13 @@ pieces have already been downloaded, if any."
 
 (defun make-client (id torrent port base-path tracker-url
                     piecemap listen-sock tracker-interval peers
-                    &key (time-now (get-time-now)))
-  (let* ((peer-states (loop for peer in peers
-                            for index = 1 then (1+ index)
-                            collect (make-peer-state torrent time-now index)))
+                    &key (time-now (get-time-now))
+                      peer-states)
+  (let* ((peer-states
+           (or peer-states
+               (loop for peer in peers
+                     for index = 1 then (1+ index)
+                     collect (make-peer-state torrent time-now index))))
          (index->peer-state (make-hash-table))
          (num-pieces-already (count-bits piecemap)))
     (loop for ps in peer-states
