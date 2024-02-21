@@ -1,20 +1,32 @@
-;; A dummy tracker, used for integration testing. Ignores HTTP
-;; parameters and just returns a dummy result (no peers).
-;; To run, call slime-eval-buffer from within Emacs.
-;; set-peer! can be used to set a peer to be included in the list.
-;; Note that data/for-tests.torrent directs to 127.0.0.1:4242/announce,
-;; which is the address that this "tracker" listens on.
+;; Used to generate a response for the dummy tracker.
+;; The torrent file at data/for-tests.torrent directs to
+;; 127.0.0.1:4242/announce, which is the address that the "tracker" should
+;; be listening on.
+;;   - (set-peer! port id) is used to set a peer to be included in the list.
+;;     The port and ID should be findable from the logs of a running client.
+;;     Note that the ID in the logs is URL-encoded, decode using:
+;;       (quri:url-decode "URL-ENCODED-STRING-HERE" :encoding :latin1)
+;;   - (clear-peer!) is self-explanatory.
+;;   - (save-tracker-response) dumps the appropriate response somewhere.
 
-(ql:quickload 'hunchentoot)
-
+(defparameter *response-path* "/tmp/tracker-response")
 (defparameter *peer* nil)
 
+;; Hello! If you're taking the URL-encoded peer ID from a client's logs, you
+;; will want to use this code to decode it first:
+;;    (quri:url-decode "URL-ENCODED-STRING-HERE" :encoding :latin1)
 (defun set-peer! (port id)
   "ID is a string in the format expected by the tracker in the HTTP request."
-  (list :port port :id id))
+  (setf *peer* (list :port port :id id)))
+
+(defun clear-peer! ()
+  (setf *peer* nil))
 
 (defun bencoded-string (s)
   (format nil "~a:~a" (length s) s))
+
+(defun bencoded-integer (i)
+  (format nil "i~ae" i))
 
 (defun get-peer-string ()
   (if (null *peer*)
@@ -22,12 +34,12 @@
       (concatenate
        'string
        "d"
-       (bencoded-string "name")
+       (bencoded-string "ip")
        (bencoded-string "127.0.0.1")
-       (bencoded-string "port")
-       (bencoded-string (getf *peer* :port))
        (bencoded-string "peer id")
        (bencoded-string (getf *peer* :id))
+       (bencoded-string "port")
+       (bencoded-integer (getf *peer* :port))
        "e")))
 
 (defun get-dummy-message ()
@@ -43,40 +55,9 @@
    "e"
    "e"))
 
-;; Following an example from Hunchentoot docs:
-;;   https://edicl.github.io/hunchentoot/#subclassing-acceptors
-;; easy-acceptor wasn't working because it was trying to convert the
-;; percent-encoded URL parameters to UTF-8 (they're bytestrings).
-(defclass dummytracker (hunchentoot:acceptor)
-  ((dispatch-table
-    :initform '()
-    :accessor dispatch-table))
-  (:default-initargs
-   :address "127.0.0.1"
-   :port 4242))
-
-(defmethod hunchentoot:acceptor-dispatch-request ((dummytracker dummytracker)
-                                                  request)
-  (mapc (lambda (dispatcher)
-	  (let ((handler (funcall dispatcher request)))
-	    (when handler
-	      (return-from hunchentoot:acceptor-dispatch-request
-                (funcall handler)))))
-	(dispatch-table dummytracker))
-  (call-next-method))
-
-(defvar *dummy*
-  (make-instance 'dummytracker
-                 :name 'http
-                 :port 4242
-                 :access-log-destination nil
-                 :message-log-destination nil))
-
-(push
- (hunchentoot:create-prefix-dispatcher "/announce" 'get-dummy-message)
- (dispatch-table *dummy*))
-
-(hunchentoot:start *dummy*)
-
-;; Call this to stop the tracker server:
-;;   (hunchentoot:stop *dummy*)
+(defun save-tracker-response ()
+  (with-open-file (stream *response-path*
+                          :direction :output
+                          :if-exists :supersede
+                          :external-format :latin1)
+    (write-string (get-dummy-message) stream)))

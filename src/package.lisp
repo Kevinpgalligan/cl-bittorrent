@@ -21,4 +21,17 @@
    :block-insert
    :make-block
    :make-partial-piece
-   :valid-piece-p))
+   :valid-piece-p
+   :make-client
+   :prune-idle-peers
+   :prune-timed-out-piece-requests
+   :maybe-update-chokes
+   :maybe-ping-tracker
+   :process-messages
+   :send-peer-messages
+   :connect-to-new-peers
+   :make-peer-state
+   :peer-states
+   :num-pieces
+   :get-time-now
+   :torrent))

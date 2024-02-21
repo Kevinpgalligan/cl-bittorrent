@@ -3,7 +3,7 @@
 (in-package bittorrent)
 
 (defparameter *handshake-timeout* 5)
-(defparameter *socket-wait-timeout* 0.2)
+(defparameter *socket-wait-timeout* 0.5)
 (defparameter *queue-timeout* 0.2)
 (defparameter *id-num-bytes* 20)
 
@@ -24,24 +24,31 @@
 
 (defun peer-loop (torrent id receive-queue send-queue peer-index &key peer sock)
   (let ((msg-buff (make-message-buffer (num-pieces torrent))))
-    (handler-case
+    (flet ((handle-condition (c)
+             (when sock
+               (usocket:socket-close sock))
+             (qpush send-queue
+                    (queue-message :tag :shutdown
+                                   :contents (format
+                                              nil
+                                              "Closing due to: ~a~%====BACKTRACE:~%~a"
+                                              c
+                                              #+sbcl(sb-debug:list-backtrace)
+                                              #-sbcl"(only with SBCL)")
+                                   :id peer-index))
+             (error (format nil "Peer loop terminating because: ~a" c))))
+      (handler-bind ((condition #'handle-condition))
         (progn
           (when (and (null peer) (null sock))
             (error "Need one of PEER or SOCK."))
           (when (null sock)
             (setf sock (usocket:socket-connect (ip peer)
                                                (port peer)
-                                               :timeout *socket-wait-timeout*)))
+                                               :timeout *socket-wait-timeout*
+                                               :element-type '(unsigned-byte 8))))
           (send-handshake torrent id sock)
           (verify-handshake torrent peer sock)
-          (message-loop send-queue receive-queue sock msg-buff peer-index))
-      (condition (c)
-        (when sock
-          (usocket:socket-close sock))
-        (qpush send-queue
-               (queue-message :tag :shutdown
-                              :contents (format nil "Closing due to: ~a" c)
-                              :id peer-index))))))
+          (message-loop send-queue receive-queue sock msg-buff peer-index))))))
 
 (defparameter *handshake-header*
   (concatenate 'vector

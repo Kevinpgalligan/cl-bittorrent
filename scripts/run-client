@@ -26,7 +26,6 @@
 
 (format t "Parsing command-line options.~%")
 
-
 (multiple-value-bind (options free-args)
     (opts:get-opts)
   (when (or (getf options :help)
@@ -35,7 +34,7 @@
     (opts:describe
      :usage-of "run-client"
      :args "[FREE-ARGS]")
-    (quit))
+    (sb-ext:exit :code -1))
   (format t "Torrent: ~a~%" (getf options :torrent))
   (format t "Download Directory: ~a~%" (getf options :dir))
   (format t "Running client.~%")

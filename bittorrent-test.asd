@@ -6,11 +6,12 @@
 (defsystem bittorrent-test
   :license "MIT"
   :author "Kevin Galligan"
-  :depends-on (:bittorrent :fiveam)
+  :depends-on (:bittorrent :fiveam :mockingbird)
   :pathname "t"
   :serial t
   :components ((:file "package")
                (:file "bencode")
                (:file "message")
                (:file "piece")
+               (:file "client")
                ))

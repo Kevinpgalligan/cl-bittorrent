@@ -25,12 +25,12 @@ pieces have already been downloaded, if any."
                        (make-array (num-pieces torrent) :element-type 'bit)))
          (tracker-url (random-http-tracker torrent)))
     (log:info "Loaded torrent with info hash: ~a" (info-hash torrent))
-    (log:info "Querying tracker: ~a" tracker-url)
     (multiple-value-bind (listen-sock port)
         (attempt-open-bittorrent-socket)
       (when (null listen-sock)
         (error "Couldn't find a free port in the range 6881-6889."))
       (log:info "Listening on port: ~a" port)
+      (log:info "Querying tracker: ~a" tracker-url)
       (unwind-protect
            (multiple-value-bind (tracker-response peer-id)
                (query-tracker torrent
@@ -45,7 +45,7 @@ pieces have already been downloaded, if any."
                            (failure-reason tracker-response)))
                (t
                 (log:info "Using peer ID (URL-encoded): ~a"
-                          (quri:url-encode peer-id))
+                          (quri:url-encode peer-id :encoding :latin1))
                 (log:info "Received ~a peers from tracker."
                           (length (peers tracker-response)))
                 (client-loop
@@ -63,7 +63,7 @@ pieces have already been downloaded, if any."
                         "127.0.0.1" port :element-type 'flexi-streams:octet)
                      (condition (c)
                        (log:info
-                        "Couldn't connect to port ~a because: ~a" port c)))
+                        "Tried port ~a but failed because: ~a" port c)))
         when sock
           do (return (values sock port))))
 
@@ -102,9 +102,9 @@ pieces have already been downloaded, if any."
                         :accessor download-complete-p)))
 
 (defun make-client (id torrent port base-path tracker-url
-                    piecemap listen-sock tracker-interval peers)
-  (let* ((time-now (get-time-now))
-         (peer-states (loop for peer in peers
+                    piecemap listen-sock tracker-interval peers
+                    &key (time-now (get-time-now)))
+  (let* ((peer-states (loop for peer in peers
                             for index = 1 then (1+ index)
                             collect (make-peer-state torrent time-now index)))
          (index->peer-state (make-hash-table))
@@ -196,20 +196,23 @@ pieces have already been downloaded, if any."
   (spin-up-peer-threads client)
   (log:info "Entering client loop.")
   (unwind-protect
-       (loop do (prune-idle-peers client)
-             do (prune-timed-out-piece-requests client)
-             do (maybe-update-chokes client)
-             do (maybe-ping-tracker client)
-             do (process-messages client)
-             do (send-peer-messages client)
-             do (connect-to-new-peers client))
+       (loop do (client-loop-step client))
     (log:info "Exiting client loop and shutting down peer threads.")
     (shut-down-peer-threads client)))
+
+(defun client-loop-step (client)
+  (prune-idle-peers client)
+  (prune-timed-out-piece-requests client)
+  (maybe-update-chokes client)
+  (maybe-ping-tracker client)
+  (process-messages client)
+  (send-peer-messages client)
+  (connect-to-new-peers client))
 
 (defun spin-up-peer-threads (client)
   (with-slots (peers peer-states torrent id control-queue)
       client
-    (loop for peer in peers 
+    (loop for peer in peers
           for ps in peer-states 
           do (spin-up-peer-thread torrent id ps control-queue :peer peer))))
 
@@ -415,6 +418,10 @@ the peer."
                      (= peer-index (peer-index req)))
                    (outstanding-requests client))))
 
+(defun get-outstanding-requests-for-peer (client peer-index)
+  (find-if (lambda (req) (= peer-index (peer-index req)))
+           (outstanding-requests client)))
+
 (defun find-outstanding-block-request (client peer-index piece-index
                                        block-begin-index len)
   (loop for req in (outstanding-requests client)
@@ -432,6 +439,7 @@ the peer."
   ;; send any messages to peers, we just queue up messages for later.
   (with-slots (id data) msg
     (log:info "Received ~a message from peer ~a" id peer-index)
+    (log-peer-message-in-detail id data)
     (let ((ps (get-peer-state client peer-index)))
       (cond
         ((member id '(:choke :unchoke))
@@ -490,6 +498,18 @@ the peer."
       (setf (first-contact-p ps) nil)
       ;; Ignoring keep-alive messages but they do still have this effect.
       (setf (last-receive-time ps) (get-time-now)))))
+
+(defun log-peer-message-in-detail (id data)
+  (cond
+    ((member id '(:have :request :cancel))
+     (log:info "Message contents: ~a" data))
+    ((eq id :piece)
+     (log:info "Message contents: index=~a, begin=~a, block=~a"
+               (getf data :index)
+               (getf data :begin)
+               (length (getf data :block))))
+    ((eq id :bitfield)
+     (log:info "Message contents: has ~a pieces" (count-bits data)))))
 
 (defun update-piecemaps (client peer-state x)
   (if (integerp x)
@@ -622,13 +642,10 @@ the peer."
 
 (defun send-proactive-messages (client)
   "Messages that aren't responses to messages from peers."
-  ;; We can only send the bitfield as our first message to
-  ;; a peer, but no point sending it if we don't have any pieces.
-  (when (not (zerop (downloaded-bytes client)))
-    (loop for ps in (peer-states client)
-          when (not (have-sent-p ps))
-            do (send-to-peer ps :bitfield (piecemap client))))
-  ;; Now request pieces!
+  (maybe-send-bitfield client)
+  (send-piece-requests client))
+
+(defun send-piece-requests (client)
   (with-slots (torrent) client
     (let ((available-peers (get-available-peers client)))
       (labels ((get-peers-with-piece (piece-index)
@@ -661,7 +678,7 @@ the peer."
                                                        (index ps)))))))
         ;; If there are still available peers, send them requests
         ;; for new pieces, if possible.
-        (loop for i upto (num-pieces torrent)
+        (loop for i below (num-pieces torrent)
               while available-peers
               when (and (not (has-piece-p client i))
                         (null (gethash i (partial-pieces client))))
@@ -677,20 +694,29 @@ the peer."
                          ;; peers-with-pieces.
                          do (let ((ps (alexandria:random-elt peers-with-piece)))
                               (send-piece-request client ps b)
-                              (when (max-capacity-p ps)
+                              (when (max-capacity-p client ps)
                                 (remove-available! ps)
                                 (setf peers-with-piece
                                       (remove-peer-state peers-with-piece
                                                          (index ps)))))))))))
 
+(defun maybe-send-bitfield (client)
+  ;; We can only send the bitfield as our first message to
+  ;; a peer, but no point sending it if we don't have any pieces.
+  (when (not (zerop (downloaded-bytes client)))
+    (loop for ps in (peer-states client)
+          when (not (have-sent-p ps))
+            do (send-to-peer ps :bitfield (piecemap client)))))
+
 (defun get-available-peers (client)
   (remove-if (lambda (ps)
                (or (they-choking ps)
-                   (max-capacity-p ps)))
+                   (max-capacity-p client ps)))
              (peer-states client)))
 
-(defun max-capacity-p (ps)
-  (> (length (outstanding-requests ps)) *max-concurrent-piece-requests*))
+(defun max-capacity-p (client ps)
+  (> (length (get-outstanding-requests-for-peer client (index ps)))
+     *max-concurrent-piece-requests*))
 
 (defclass outstanding-request ()
   ((peer-index :initarg :peer-index :reader peer-index)

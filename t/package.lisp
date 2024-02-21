@@ -1,5 +1,5 @@
 (defpackage bittorrent-test
-  (:use :cl :fiveam :bittorrent))
+  (:use :cl :fiveam :mockingbird :bittorrent))
 
 (in-package bittorrent-test)
 

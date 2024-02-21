@@ -114,8 +114,6 @@ Returns the response and the peer ID."
         collect (make-instance 'peer
                                :ip (bencode:dict-get peer "ip")
                                :port (bencode:dict-get peer "port")
-                               ;; Potential bug: I'm not sure if this
-                               ;; is URL-encoded.
                                :id (bencode:dict-get peer "peer id"))))
   
 (defun parse-peers-from-bytestring (string)
