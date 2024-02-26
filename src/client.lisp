@@ -251,10 +251,10 @@ state in the client associated with that peer."
 (defun prune-timed-out-piece-requests (client)
   (let* ((now (get-time-now))
          (timed-out-reqs
-           (find-if (lambda (req)
-                      (> (- now (request-time req))
-                         *piece-request-timeout*))
-                    (outstanding-requests client))))
+           (remove-if-not (lambda (req)
+                            (> (- now (request-time req))
+                               *piece-request-timeout*))
+                          (outstanding-requests client))))
     (loop for req in timed-out-reqs
           do (log:info "Pruning timed-out piece request: ~a ~a ~a ~a"
                        (peer-index req)
@@ -270,7 +270,9 @@ state in the client associated with that peer."
     (log:info "Updating chokes!")
     (update-chokes client)
     (setf (last-update-time client) (get-time-now))
-    (incf (optimistic-unchoke-count client))))
+    (setf (optimistic-unchoke-count client)
+          (mod (1+ (optimistic-unchoke-count client))
+               *optimistic-unchoke-period*))))
 
 (defun time-to-update? (client)
   (> (- (get-time-now) (last-update-time client))
@@ -283,7 +285,7 @@ state in the client associated with that peer."
     (when (and peer-states (zerop optimistic-unchoke-count))
       ;; Time to update which peer we're optimistically unchoking.
       (setf optimistic-unchoke 
-            (index (alexandria:random-elt peer-states))))
+            (index (get-random-element peer-states))))
     (log:info "Optimistically unchoking: ~a" optimistic-unchoke)
     (let ((next-unchoked (select-peers-to-unchoke client)))
       (log:info "Unchoke list: ~a" next-unchoked)
@@ -297,6 +299,9 @@ state in the client associated with that peer."
                    (prepare-peer-message client
                                          ps
                                          (if now-choked? :choke :unchoke))))))))
+
+(defun get-random-element (xs)
+  (alexandria:random-elt xs))
 
 (defun select-peers-to-unchoke (client)
   (with-slots (peer-states optimistic-unchoke download-complete-p)
@@ -336,6 +341,12 @@ state in the client associated with that peer."
   (update-transfer-rate ps 'uploaded-bytes)
   (update-transfer-rate ps 'downloaded-bytes))
 
+(defun increment-downloaded-bytes (ps size)
+  (incf (car (downloaded-bytes ps)) size))
+
+(defun increment-uploaded-bytes (ps size)
+  (incf (car (uploaded-bytes ps)) size))
+
 (defun update-transfer-rate (ps bytes-slot)
   (when (>= (length (slot-value ps bytes-slot))
             *rolling-transfer-window*)
@@ -372,7 +383,6 @@ state in the client associated with that peer."
                port last-tracker-ping downloaded-bytes uploaded-bytes)
       client
     (when (> (elapsed-time last-tracker-ping) tracker-interval)
-      (log:info "Pinging the tracker.")
       (setf last-tracker-ping (get-time-now))
       ;; Not currently using the tracker response for anything, let new
       ;; peers be the ones to connect to us.
@@ -472,6 +482,10 @@ the peer."
                     (getf data :index)
                     (getf data :begin)
                     (getf data :length))))
+           ;; We haven't confirmed the validity of the piece, peers could send
+           ;; large streams of junk, we'd discard the resulting pieces, but they'd
+           ;; still be considered a "generous" peer.
+           (increment-downloaded-bytes ps (getf data :length))
            (setf (outstanding-requests client)
                  (remove req (outstanding-requests client)))
            (store-block client data)
@@ -637,6 +651,10 @@ the peer."
               (begin req)
               (+ (begin req) (len req)))))
       (incf (uploaded-bytes client) (length b))
+      ;; We assume that the bytes are actually sent by the peer thread, not
+      ;; the most resilient approach. But if it fails to send, the connection will
+      ;; be dropped anyway, making accurate accounting unimportant.
+      (increment-uploaded-bytes (peer-state req) (length b))
       (send-to-peer (peer-state req)
                     :piece
                     (list :index (index req)
@@ -739,7 +757,7 @@ the peer."
                        :peer-index (index ps)
                        :piece-index (getf b :piece-index)
                        :block-begin-index (getf b :begin)
-                       :length (getf b :length)
+                       :len (getf b :length)
                        :request-time (get-time-now))
         (outstanding-requests client)))
 
