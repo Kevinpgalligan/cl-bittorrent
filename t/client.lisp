@@ -112,10 +112,12 @@
                 :key (lambda (msg)
                        (bito::target msg))))))
 
-(defun make-peer-states (torrent data)
-  (loop for (id downloaded) in data
+(defun make-peer-states (torrent data &key uploading)
+  (loop for (id num-bytes) in data
         collect (let ((ps (make-peer-state torrent *curr-time* id)))
-                  (bito::increment-downloaded-bytes ps downloaded)
+                  (if uploading
+                      (bito::increment-uploaded-bytes ps num-bytes)
+                      (bito::increment-downloaded-bytes ps num-bytes))
                   ps)))
 
 (def-client-test choke-update-when-downloading
@@ -130,6 +132,30 @@
                             (6 0)))
       (let* ((peer-states (list ps1 ps2 ps3 ps4 ps5 ps6))
              (client (make-test-client torrent peer-states)))
+        (bito::update-chokes client)
+        ;; Top 4 most generous peers should be unchoked.
+        (is-false (bito::choked ps1))
+        (is-false (bito::choked ps2))
+        (is-false (bito::choked ps3))
+        (is-false (bito::choked ps5))
+        ;; One of the remaining peers should be optimistically unchoked.
+        (is-true (or (and (not (bito::choked ps4)) (bito::choked ps6))
+                     (and (bito::choked ps4) (not (bito::choked ps6)))))))))
+
+(def-client-test choke-update-when-uploading
+  (let ((torrent (make-test-torrent)))
+    (destructuring-bind (ps1 ps2 ps3 ps4 ps5 ps6)
+        (make-peer-states torrent
+                          '((1 100)
+                            (2 105)
+                            (3 101)
+                            (4 90)
+                            (5 200)
+                            (6 0))
+                          :uploading t)
+      (let* ((peer-states (list ps1 ps2 ps3 ps4 ps5 ps6))
+             (client (make-test-client torrent peer-states)))
+        (setf (bito::download-complete-p client) t)
         (bito::update-chokes client)
         ;; Top 4 most generous peers should be unchoked.
         (is-false (bito::choked ps1))
@@ -176,7 +202,12 @@
             ;; new optimistic unchoke only takes place on the last update.
             (setf (bito::last-update-time client) 0)
             (inc-downloaded)
+            ;; Mini check that transfer rates are updated.
+            (bito::increment-uploaded-bytes ps1 50)
+            (is (= 200 (bito::downloaded-bytes-sum ps1)))
             (bito::maybe-update-chokes client)
+            (is (= 100 (bito::downloaded-bytes-sum ps1)))
+            (is (= 50 (bito::uploaded-bytes-sum ps1)))
             (is-false (bito::choked ps5))
             (is-true (bito::choked ps6))
             (is-false (find-pending-message client ps5))
@@ -185,6 +216,7 @@
             (setf (bito::last-update-time client) 0)
             (inc-downloaded)
             (bito::maybe-update-chokes client)
+            (is (= 0 (bito::uploaded-bytes-sum ps1)))
             (is-false (bito::choked ps5))
             (is-true (bito::choked ps6))
             (is-false (find-pending-message client ps5))
@@ -211,3 +243,49 @@
       (mockingbird:clear-calls)
       (bito::maybe-ping-tracker client)
       (is (= 0 (mockingbird:call-times-for 'bito::query-tracker))))))
+
+(defun verify-queue-message (msgs msg-tag msg-contents &key (count 1))
+  (is (= count
+         (length
+          (remove-if-not
+           (lambda (msg)
+             (and (eq (bito::tag msg) msg-tag)
+                  (or (and (eq (class-of (bito::contents msg))
+                               (find-class 'bito::message))
+                           (eq (class-of msg-contents)
+                               (find-class'bito::message))
+                           (bito::message= (bito::contents msg) msg-contents))
+                      (equalp msg-contents (bito::contents msg)))))
+           msgs)))))
+
+(def-client-test sends-keepalives
+  (let* ((torrent (make-test-torrent))
+         (t2 (- *curr-time*
+                bito::*max-idle-time*
+                (- 1)))
+         ;; Should send keepalive to first but not second.
+         (ps1 (make-peer-state torrent
+                               (- *curr-time*
+                                  bito::*max-idle-time*
+                                  1)
+                               1))
+         (ps2 (make-peer-state torrent t2 2))
+         (client
+           (make-test-client torrent (list ps1 ps2))))
+    (bito::send-keepalives client)
+    (is (= *curr-time* (bito::last-send-time ps1)))
+    (is (=  t2 (bito::last-send-time ps2)))
+    (is-true (bito::have-sent-p ps1))
+    (is-false (bito::have-sent-p ps2))
+    (let ((msgs (bito::qdump (bito::queue ps1))))
+      (verify-queue-message msgs
+                            :peer-message
+                            (bito::make-message :id :keep-alive)))
+    (is-true (bito::qempty-p (bito::queue ps2)))))
+
+;;;; OTHER TESTS
+;; 1. send proactive messages
+;; 2. send pending messages
+;; 3. send requested blocks
+;; 4. connect to new peers
+;; 5. process messages

@@ -10,6 +10,7 @@ The minimum additions to make this actually useful:
 * UDP communication with trackers (currently uses the old HTTP protocol, which most trackers don't accept anymore).
 * Let the tracker know when we've finished / are shutting down.
 * Handle case where client is in tracker's list of peers, i.e. don't try communicating with self.
+* Better tracking of upload/download rate for peers. Right now, peers could be sending us vast amounts of junk data, and we would consider them "good uploaders" & keep them unchoked. There's also no feedback from the worker threads to say that data was successfully sent to a peer.
 
 ### Setup
 Clone the repo in your quicklisp local-projects/ directory, or add a symbolic link pointing to wherever you cloned it.

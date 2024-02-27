@@ -30,3 +30,10 @@
 
 (defun qpop (queue &optional (timeout 0))
   (lparallel.queue:try-pop-queue queue :timeout timeout))
+
+(defun qempty-p (queue)
+  (lparallel.queue:queue-empty-p queue))
+
+(defun qdump (queue)
+  (loop while (not (qempty-p queue))
+        collect (qpop queue)))
