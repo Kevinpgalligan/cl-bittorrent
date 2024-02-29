@@ -432,8 +432,8 @@ the peer."
                    (outstanding-requests client))))
 
 (defun get-outstanding-requests-for-peer (client peer-index)
-  (find-if (lambda (req) (= peer-index (peer-index req)))
-           (outstanding-requests client)))
+  (remove-if-not (lambda (req) (= peer-index (peer-index req)))
+                 (outstanding-requests client)))
 
 (defun find-outstanding-block-request (client peer-index piece-index
                                        block-begin-index len)
@@ -590,7 +590,7 @@ the peer."
     (let* ((b (make-block (getf block-data :index)
                           (getf block-data :begin)
                           (getf block-data :block)))
-           (partial-piece (gethash (index b) (partial-pieces client)))
+           (partial-piece (get-partial-piece client (index b)))
            (piece-start (* (index b) (piece-length torrent))))
       (when (null partial-piece)
         (setf partial-piece
@@ -598,11 +598,17 @@ the peer."
                                   piece-start
                                   (min (+ piece-start (piece-length torrent))
                                        (total-length torrent))))
-        (setf (gethash (index b) (partial-pieces client)) partial-piece))
+        (save-partial-piece client partial-piece))
       (log:info "Storing block ~a-~a for piece ~a"
                 (start b) (+ (start b) (length (bytes b))) (piece-index b))
       (block-insert partial-piece b)
       (pop-and-write-piece-if-ready client partial-piece))))
+
+(defun save-partial-piece (client pp)
+  (setf (gethash (piece-index pp) (partial-pieces client)) pp))
+
+(defun get-partial-piece (client index)
+  (gethash index (partial-pieces client)))
 
 (defun pop-and-write-piece-if-ready (client partial-piece)
   (when (piece-ready-p partial-piece)
@@ -683,7 +689,7 @@ the peer."
         (loop for partial-piece being the hash-values of (partial-pieces client)
                 using (hash-key piece-index)
               while available-peers
-              for peers-with-piece = (get-peers-with-piece (index partial-piece))
+              for peers-with-piece = (get-peers-with-piece piece-index)
               ;; Check for outstanding requests. Find the next block
               ;; for this piece that doesn't have an outstanding request. Then
               ;; request it from a random peer that has the piece.
@@ -692,7 +698,7 @@ the peer."
                        ;; We have available peers with this piece - request data!
                        do (let ((ps (alexandria:random-elt peers-with-piece)))
                             (send-piece-request client ps b)
-                            (when (max-capacity-p ps)
+                            (when (max-capacity-p client ps)
                               (remove-available! ps)
                               (setf peers-with-piece
                                     (remove-peer-state peers-with-piece

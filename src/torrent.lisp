@@ -14,7 +14,10 @@
    (total-length :initarg :total-length :accessor total-length)
    (piece-length :initarg :piece-length :reader piece-length)
    (piece-hashes :initarg :piece-hashes :reader piece-hashes)
-   (num-pieces :initarg :num-pieces :reader num-pieces)))
+   (num-pieces :initarg :num-pieces :reader num-pieces)
+   (max-block-size :initarg :max-block-size
+                   :reader max-block-size
+                   :initform *max-block-size*)))
 
 (defun all-blocks (torrent piece-index)
   "Divides a piece up into blocks, returns a list of plists where
@@ -25,11 +28,12 @@ index of that block within the piece and the length of the block."
     (let* ((start-index (* piece-length piece-index))
            (this-piece-length (min piece-length
                                    (- total-length start-index))))
-      (loop for relative-i = 0 then (+ relative-i *max-block-size*)
+      (loop for relative-i = 0 then (+ relative-i (max-block-size torrent))
             while (< relative-i this-piece-length)
             collect (list :piece-index piece-index
                           :begin relative-i
-                          :length this-piece-length)))))
+                          :length (min (max-block-size torrent)
+                                       (- this-piece-length relative-i)))))))
 
 (defclass filespec ()
   ((path :initarg :path :accessor path)

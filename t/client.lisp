@@ -8,19 +8,21 @@
 (defparameter *num-pieces* 10)
 (defparameter *curr-time* (* 5000 internal-time-units-per-second))
 (defparameter *tracker-interval* 900)
+(defparameter *blocksize* 40)
+(defparameter *piecesize* 120) ; 3 blocks per piece
 
 (defun make-test-torrent ()
-  ;; Can fill in the parameters as they become needed for unit tests.
   (make-instance 'torrent
                  :metainfo nil
                  :tracker-list nil
                  :info-hash nil
                  :dirname nil
                  :files nil
-                 :total-length 100
-                 :piece-length 10
+                 :total-length (* *piecesize* *num-pieces*)
+                 :piece-length *piecesize*
                  :piece-hashes nil
-                 :num-pieces *num-pieces*))
+                 :num-pieces *num-pieces*
+                 :max-block-size *blocksize*))
 
 (defun make-test-client (torrent &optional peer-states)
   (make-client
@@ -283,9 +285,138 @@
                             (bito::make-message :id :keep-alive)))
     (is-true (bito::qempty-p (bito::queue ps2)))))
 
+(def-client-test sends-bitfield-on-start
+  (let* ((torrent (make-test-torrent))
+         (ps1 (make-peer-state torrent 0 1))
+         (ps2 (make-peer-state torrent 0 2))
+         (client (make-test-client torrent (list ps1 ps2))))
+    ;; Won't send if we haven't downloaded any bytes.
+    (incf (bito::downloaded-bytes client) 10)
+    (setf (bito::have-sent-p ps1) t)
+    (bito::maybe-send-bitfield client)
+    (is-true (bito::qempty-p (bito::queue ps1)))
+    (verify-queue-message (bito::qdump (bito::queue ps2))
+                          :peer-message
+                          (bito::make-message :id :bitfield
+                                              :data (bito::piecemap client)))
+    (bito::maybe-send-bitfield client)
+    (is-true (bito::qempty-p (bito::queue ps1)))
+    (is-true (bito::qempty-p (bito::queue ps2)))))
+
+(defun some-bytes (n)
+  (make-array n
+              :element-type '(unsigned-byte 8)
+              :initial-element 1))
+
+(defun gather-sent-request-messages (&rest peer-states)
+  (apply #'append
+         (loop for ps in peer-states
+               collect (mapcar
+                        (lambda (qmsg)
+                          (list (bito::index ps)
+                                (bito::data (bito::contents qmsg))))
+                        (remove-if-not
+                         (lambda (qmsg)
+                           (and (eq :peer-message (bito::tag qmsg))
+                                (bito::contents qmsg)
+                                (eq :request
+                                    (bito::id (bito::contents qmsg)))))
+                         (bito::qdump (bito::queue ps)))))))
+
+(def-client-test remaining-blocks
+  (let* ((torrent (make-test-torrent))
+         (client (make-test-client torrent nil)))
+    (let ((pp (bito::make-partial-piece 0 0 *piecesize*))
+          (pp2 (bito::make-partial-piece 1 *piecesize* (* 2 *piecesize*))))
+      (bito::block-insert pp (bito::make-block 0 0 (some-bytes *blocksize*)))
+      (bito::save-partial-piece client pp)
+      (push (make-instance 'bito::outstanding-request
+                           :peer-index 2
+                           :piece-index 1
+                           :block-begin-index *blocksize*
+                           :len *blocksize*
+                           :request-time *curr-time*)
+            (bito::outstanding-requests client))
+      (is (equalp
+           '((:piece-index 0
+              :begin 40
+              :length 40)
+             (:piece-index 0
+              :begin 80
+              :length 40))
+           (bito::remaining-blocks client pp)))
+      (is (equalp
+           '((:piece-index 1
+              :begin 0
+              :length 40)
+             (:piece-index 1
+              :begin 80
+              :length 40))
+           (bito::remaining-blocks client pp2))))))
+
+(def-client-test sends-piece-requests
+  (let* ((torrent (make-test-torrent))
+         (ps1 (make-peer-state torrent 0 1))
+         (ps2 (make-peer-state torrent 0 2))
+         (ps3 (make-peer-state torrent 0 3))
+         (client (make-test-client torrent (list ps1 ps2 ps3))))
+    (setf (bito::they-choking ps2) nil
+          (bito::they-choking ps3) nil)
+    (bito::mark-piece ps1 0)
+    (bito::mark-piece ps2 0)
+    (bito::mark-piece ps2 1)
+    (bito::mark-piece ps2 8)
+    (bito::mark-piece ps3 2)
+    ;; Let's say we've accumulated the first block of the piece
+    ;; at index 1, and there's an outstanding request for the
+    ;; second block. Each piece in the test env consists of 3 blocks.
+    ;; The final block should be prioritised over the blocks of
+    ;; other pieces because this piece is in progress.
+    ;; Peer 2 is using 1/4 of its max concurrent requests; if we
+    ;; didn't prioritise partial pieces, then (depending on the piece
+    ;; iteration order) the remaining 3/4 requests would be used to
+    ;; fetch piece 0.
+    (let ((pp (bito::make-partial-piece 1 0 *piecesize*)))
+      (bito::block-insert pp
+                          (bito::make-block 1 0 (some-bytes *blocksize*)))
+      (bito::save-partial-piece client pp))
+    (push (make-instance 'bito::outstanding-request
+                         :peer-index 2
+                         :piece-index 1
+                         :block-begin-index *blocksize*
+                         :len *blocksize*
+                         :request-time *curr-time*)
+          (bito::outstanding-requests client))
+    (bito::send-piece-requests client)
+    (let ((msgs (gather-sent-request-messages ps1 ps2 ps3)))
+      (flet ((num-messages-to-peer (index)
+               (length
+                (remove-if-not (lambda (msg) (= index (first msg)))
+                               msgs))))
+        (is (= 0 (num-messages-to-peer 1)))
+        (is (= 4 (num-messages-to-peer 2)))
+        (is (= 3 (num-messages-to-peer 3)))
+        (is-true (find-if (lambda (data)
+                            (and (= 1 (getf data :index))
+                                 (= 80 (getf data :begin))
+                                 (= 40 (getf data :length))))
+                          (mapcar #'second msgs)))
+        ;; Each block/request msg must correspond to an entry in the list
+        ;; of outstanding requests.
+        (loop for msg in msgs
+              for peer-index = (first msg)
+              for data = (second msg)
+              do (is-true (find-if
+                           (lambda (req)
+                             (and
+                              (= peer-index (bito::peer-index req))
+                              (= (getf data :index) (bito::piece-index req))
+                              (= (getf data :begin) (bito::block-begin-index req))
+                              (= (getf data :length) (bito::len req))))
+                           (bito::outstanding-requests client))))))))
+
 ;;;; OTHER TESTS
-;; 1. send proactive messages
-;; 2. send pending messages
-;; 3. send requested blocks
-;; 4. connect to new peers
-;; 5. process messages
+;; 1. send pending messages
+;; 2. send requested blocks
+;; 3. connect to new peers
+;; 4. process messages
