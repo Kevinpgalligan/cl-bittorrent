@@ -539,7 +539,11 @@ the peer."
         (set-piecemap peer-state x))))
 
 (defun has-piece-p (obj i)
-  (= 1 (bit (piecemap obj) i)))
+  (let ((pm (piecemap obj)))
+    (and 
+     (<= 0 i)
+     (< i (length pm))
+     (= 1 (bit pm i)))))
 
 (defun mark-piece (obj i)
   (setf (bit (piecemap obj) i) 1))

@@ -109,7 +109,7 @@ with other blocks, etc."
 into the torrent data when laid out contiguously on the file system. This
 range might include multiple files. Assumes that the files exist, which they
 should if the piece has been written there already."
-  (let* ((frs (get-file-ranges torrent start end))
+  (let* ((frs (get-file-ranges (files torrent) start end))
          (buffer (make-array (reduce #'+ frs :key #'len :initial-value 0)
                              :element-type '(unsigned-byte))))
     (loop for fr in frs

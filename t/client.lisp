@@ -10,6 +10,7 @@
 (defparameter *tracker-interval* 900)
 (defparameter *blocksize* 40)
 (defparameter *piecesize* 120) ; 3 blocks per piece
+(defparameter *client-id* 'i-am-an-id)
 
 (defun make-test-torrent ()
   (make-instance 'torrent
@@ -26,7 +27,7 @@
 
 (defun make-test-client (torrent &optional peer-states)
   (make-client
-   nil ; id
+   *client-id*
    torrent
    4242
    "/tmp/"
@@ -415,8 +416,117 @@
                               (= (getf data :length) (bito::len req))))
                            (bito::outstanding-requests client))))))))
 
+(def-client-test sends-pending-messages-to-all
+  (let* ((torrent (make-test-torrent))
+         (ps1 (make-peer-state torrent 0 1))
+         (ps2 (make-peer-state torrent 0 2))
+         (client (make-test-client torrent (list ps1 ps2))))
+    (bito::prepare-peer-message client :all :have 5)
+    (bito::send-pending-messages client)
+    (loop for ps in (list ps1 ps2)
+          do (let ((qmsgs (bito::qdump (bito::queue ps))))
+               (is (= 1 (length qmsgs)))
+               (let ((qmsg (first qmsgs)))
+                 (is (eq :peer-message (bito::tag qmsg)))
+                 (is-true
+                  (bito::message=
+                   (bito::make-message :id :have :data 5)
+                   (bito::contents qmsg))))))))
+
+(def-client-test sends-pending-messages-to-single-peer
+  (let* ((torrent (make-test-torrent))
+         (ps1 (make-peer-state torrent 0 1))
+         (ps2 (make-peer-state torrent 0 2))
+         (client (make-test-client torrent (list ps1 ps2))))
+    (bito::prepare-peer-message client ps1 :have 5)
+    (bito::send-pending-messages client)
+    (is-true (bito::qempty-p (bito::queue ps2)))
+    (let ((qmsgs (bito::qdump (bito::queue ps1))))
+      (is (= 1 (length qmsgs)))
+      (let ((qmsg (first qmsgs)))
+        (is (eq :peer-message (bito::tag qmsg)))
+        (is-true
+         (bito::message=
+          (bito::make-message :id :have :data 5)
+          (bito::contents qmsg)))))))
+
+(defun verify-peer-messages (ps messages)
+  (let ((qmsgs (bito::qdump (bito::queue ps))))
+    (is (= (length messages) (length qmsgs)))
+    (loop for qmsg in qmsgs
+          for msg in messages
+          do (progn
+               (is (eq :peer-message (bito::tag qmsg)))
+               (is-true
+                (bito::message= msg (bito::contents qmsg)))))))
+
+(def-client-test sends-requested-blocks
+  (let* ((torrent (make-test-torrent))
+         (ps1 (make-peer-state torrent 0 1))
+         (client (make-test-client torrent (list ps1)))
+         (bdata #(1 2 3 4 5 6 7 8 9 10)))
+    (bito::add-to-requests-list client
+                                ps1
+                                '(:index 2
+                                  :begin 0
+                                  :length 10))
+    (with-dynamic-stubs
+        ((bito::load-bytes-from-files bdata))
+      (bito::send-requested-blocks client))
+    (verify-peer-messages
+     ps1
+     (list (bito::make-message :id :piece
+                               :data (list
+                                      :index 2
+                                      :begin 0
+                                      :block bdata))))
+    (is (= 10 (bito::uploaded-bytes client)))
+    (is (= 10 (bito::uploaded-bytes-sum ps1)))))
+
+(def-client-test connects-to-new-peers
+  (let* ((torrent (make-test-torrent))
+         (client (make-test-client torrent
+                                   (list (make-peer-state torrent
+                                                          *curr-time*
+                                                          1)))))
+    (with-dynamic-stubs
+        ((usocket:wait-for-input t)
+         (usocket:socket-accept 'hello-fellow-sockets)
+         (bito::spin-up-peer-thread nil))
+      (bito::connect-to-new-peers client)
+      (is (= 2 (length (bito::peer-states client))))
+      (let ((ps (first (bito::peer-states client))))
+        (is (= 2 (bito::index ps)))
+        ;; Not sure if this is the place to test all these attributes, oh well.
+        (is (eq t (bito::choked ps)))
+        (is (eq t (bito::they-choking ps)))
+        (is (eq nil (bito::interested ps)))
+        (is (eq nil (bito::they-interested ps)))
+        (is (= *num-pieces* (length (bito::piecemap ps))))
+        (is (= 0 (bito::num-desired-pieces ps)))
+        (is (= *curr-time* (bito::last-receive-time ps)))
+        (is (= *curr-time* (bito::last-send-time ps)))
+        (is (eq nil (bito::have-sent-p ps)))
+        (is (= 0 (bito::downloaded-bytes-sum ps)))
+        (is (= 0 (bito::uploaded-bytes-sum ps)))
+
+        (is (= 3 (bito::next-peer-index client)))
+        (is (eq ps (bito::gethash 2 (bito::index->peer-state client)) ))
+        (is
+         (equalp
+          (list torrent
+                *client-id*
+                ps
+                (bito::control-queue client)
+                :sock 'hello-fellow-sockets)
+          (mockingbird:nth-mock-args-for 1 'bito::spin-up-peer-thread)))))
+    (with-dynamic-stubs
+        ((usocket:wait-for-input nil)
+         (bito::spin-up-peer-thread nil))
+      (bito::connect-to-new-peers client)
+      (is (= 2 (length (bito::peer-states client))))
+      (is (= 0 (mockingbird:call-times-for 'bito::spin-up-peer-thread))))))
+
 ;;;; OTHER TESTS
-;; 1. send pending messages
-;; 2. send requested blocks
-;; 3. connect to new peers
-;; 4. process messages
+;; 1. loading blocks from disk
+;; 2. process messages
