@@ -65,3 +65,37 @@
                    :begin 60
                    :length 27))
                 (bito::all-blocks torrent 9)))))
+
+(test writes-and-reads-pieces
+  (let* ((fss (list (make-filespec "/tmp/f1.txt" 7)
+                    (make-filespec "/tmp/f2.txt" 8)))
+         (torrent
+           (make-instance 'torrent
+                          :metainfo nil
+                          :tracker-list nil
+                          :info-hash nil
+                          :dirname nil
+                          :files fss
+                          :total-length 15
+                          :piece-length 5
+                          :piece-hashes nil
+                          :num-pieces 3
+                          :max-block-size 5))
+         (piece0 (make-piece 0 0 5 #(0 1 2 3 4)))
+         (piece1 (make-piece 1 5 10  #(5 6 7 8 9)))
+         (piece2 (make-piece 2 10 15 #(10 11 12 13 14))))
+    (unwind-protect
+         (progn
+           (write-piece piece0 fss)
+           (write-piece piece1 fss)
+           (write-piece piece2 fss)
+           (is (equalp #(0 1 2 3 4 5 6 7 8 9 10 11 12 13 14)
+                       (load-bytes-from-files torrent 0 15)))
+           (is (equalp #(0 1 2 3 4)
+                       (load-bytes-from-files torrent 0 5)))
+           (is (equalp #(9 10 11 12 13 14)
+                       (load-bytes-from-files torrent 9 15)))
+           (is (equalp #(5 6 7 8 9 10 11)
+                       (load-bytes-from-files torrent 5 12))))
+      (loop for fs in fss
+            do (uiop:delete-file-if-exists (bito::path fs))))))

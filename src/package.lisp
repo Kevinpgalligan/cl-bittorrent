@@ -34,4 +34,8 @@
    :peer-states
    :num-pieces
    :get-time-now
-   :torrent))
+   :torrent
+   :make-filespec
+   :make-piece
+   :write-piece
+   :load-bytes-from-files))

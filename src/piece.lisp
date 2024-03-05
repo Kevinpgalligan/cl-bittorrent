@@ -87,14 +87,16 @@ with other blocks, etc."
   (with-open-file (stream
                    (path fr)
                    :direction :output
+                   :if-exists :append
+                   :if-does-not-exist :create
                    :element-type '(unsigned-byte 8))
     (file-position stream (relative-start fr))
     (write-sequence (bytes piece)
                     stream
-                    ;; These give the relative indexes within the piece
-                    ;; that we want to write to this part of the file.
-                    :start (- (absolute-start fr) (start piece))
-                    :end (- (absolute-end fr) (start piece)))))
+                    :start (- (max (absolute-start fr) (start piece))
+                              (start piece))
+                    :end (- (min (absolute-end fr) (end piece))
+                            (start piece)))))
 
 (defclass file-range ()
   ((path :initarg :path :reader path)
@@ -111,10 +113,12 @@ range might include multiple files. Assumes that the files exist, which they
 should if the piece has been written there already."
   (let* ((frs (get-file-ranges (files torrent) start end))
          (buffer (make-array (reduce #'+ frs :key #'len :initial-value 0)
-                             :element-type '(unsigned-byte))))
-    (loop for fr in frs
-          for i = 0 then (+ i (len fr))
-          do (read-file-range-into-buffer fr buffer i))))
+                             :element-type '(unsigned-byte 8))))
+    (loop with i = 0
+          for fr in frs
+          do (read-file-range-into-buffer fr buffer i)
+          do (incf i (len fr)))
+    buffer))
 
 (defun read-file-range-into-buffer (fr buffer buffer-ptr)
   (with-open-file (stream (path fr) :element-type '(unsigned-byte 8))
@@ -125,19 +129,22 @@ should if the piece has been written there already."
                    :end (+ buffer-ptr (len fr)))))
 
 (defun get-file-ranges (filespecs start end)
-  (loop for filespec in filespecs
-        for file-start = 0 then (+ file-start (len filespec))
+  (loop with file-start = 0
+        for filespec in filespecs
         while (< file-start end)
         for file-end = (+ file-start (len filespec))
         for overlap = (ranges-overlap file-start file-end start end)
         when overlap
-          collect (make-instance 'file-range
-                                 :path (path filespec)
-                                 :absolute-start file-start
-                                 :absolute-end file-end
-                                 :relative-start (- (first overlap) file-start)
-                                 :relative-end (- (second overlap) file-start)
-                                 :len (len filespec))))
+          collect (let ((s (first overlap))
+                        (e (second overlap)))
+                    (make-instance 'file-range
+                                   :path (path filespec)
+                                   :absolute-start s
+                                   :absolute-end e
+                                   :relative-start (- s file-start)
+                                   :relative-end (- e file-start)
+                                   :len (- e s)))
+        do (incf file-start (len filespec))))
 
 (defun ranges-overlap (s1 e1 s2 e2)
   "Returns '(start end) or nil. Starts are inclusive, ends exclusive."

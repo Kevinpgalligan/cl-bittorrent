@@ -527,6 +527,83 @@
       (is (= 2 (length (bito::peer-states client))))
       (is (= 0 (mockingbird:call-times-for 'bito::spin-up-peer-thread))))))
 
+(def-client-test handles-shutdown-message
+  (let* ((torrent (make-test-torrent))
+         (ps (make-peer-state torrent *curr-time* 1))
+         (client (make-test-client torrent (list ps)))
+         (q (bito::control-queue client)))
+    (push (make-instance 'bito::outstanding-request
+                         :peer-index 1
+                         :piece-index 0
+                         :block-begin-index 0
+                         :len 100
+                         :request-time *curr-time*)
+          (bito::outstanding-requests client))
+    (bito::qpush q
+                 (bito::queue-message :tag :shutdown
+                                      :contents nil
+                                      :id 1))
+    (bito::process-messages client)
+    (is-false (bito::peer-states client))
+    (is-false (bito::outstanding-requests client))))
+
+(defmacro def-message-test (name &body body)
+  `(def-client-test ,name
+     (let* ((torrent (make-test-torrent))
+            (ps1 (make-peer-state torrent 0 1))
+            (ps2 (make-peer-state torrent 0 2))
+            (client (make-test-client torrent (list ps1 ps2)))
+            (q (bito::control-queue client)))
+       ,@body)))
+
+(defun push-msg (q peer-index msg-id &optional msg-data)
+  (bito::qpush q
+               (bito::queue-message :tag :peer-message
+                                    :contents (make-message :id msg-id
+                                                            :data msg-data)
+                                    :id peer-index)))
+
+(def-message-test handles-keep-alive
+  (push-msg q 1 :keep-alive)
+  (bito::process-messages client)
+  (is-false (bito::first-contact-p ps1))
+  (is-true (bito::first-contact-p ps2))
+  (is (= *curr-time* (bito::last-receive-time ps1)))
+  (is (= 0 (bito::last-receive-time ps2))))
+
+(def-message-test handles-choke-unchoke
+  (setf (bito::they-choking ps2) nil)
+  (push-msg q 1 :unchoke)
+  (push-msg q 2 :choke)
+  (push (make-instance 'bito::outstanding-request
+                       :peer-index 2
+                       :piece-index 0
+                       :block-begin-index 0
+                       :len 100
+                       :request-time *curr-time*)
+        (bito::outstanding-requests client))
+
+  (bito::process-messages client)
+
+  (is-false (bito::they-choking ps1))
+  (is-true (bito::they-choking ps2))
+  (is-false (bito::outstanding-requests client)))
+
+(def-message-test handles-interested-not-interested
+  (setf (bito::they-interested ps2) t)
+  (push-msg q 1 :interested)
+  (push-msg q 2 :not-interested)
+
+  (bito::process-messages client)
+
+  (is-true (bito::they-interested ps1))
+  (is-false (bito::they-interested ps2)))
+
 ;;;; OTHER TESTS
-;; 1. loading blocks from disk
-;; 2. process messages
+;; 1. have
+;; 2. bitfield
+;; 3. request
+;; 4. piece
+;; 5. cancel
+
+;; q: are we unchoking interested people?
