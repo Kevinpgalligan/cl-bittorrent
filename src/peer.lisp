@@ -22,7 +22,8 @@
   (coerce (loop repeat *id-num-bytes* collect (code-char (random 256)))
           'string))
 
-(defun peer-loop (torrent id receive-queue send-queue peer-index &key peer sock)
+(defun peer-loop (torrent id receive-queue send-queue peer-index
+                  &key peer sock debug-p)
   (let ((msg-buff (make-message-buffer (num-pieces torrent))))
     (flet ((handle-condition (c)
              (when sock
@@ -36,7 +37,11 @@
                                               #+sbcl(sb-debug:list-backtrace)
                                               #-sbcl"(only with SBCL)")
                                    :id peer-index))
-             (error (format nil "Peer loop terminating because: ~a" c))))
+             (if debug-p
+                 (error (format nil "Peer loop terminating because: ~a" c))
+                 (progn
+                   #+sbcl (sb-thread:return-from-thread 0)
+                   #-sbcl(error "Dunno how to cleanly exit a thread in non-SBCL!")))))
       (handler-bind ((condition #'handle-condition))
         (progn
           (when (and (null peer) (null sock))

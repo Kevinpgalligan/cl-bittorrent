@@ -84,21 +84,24 @@
                                                 :length 131072))))))
 
 (test bitfield-message
-  (store-and-check '(#(0 0 0 2 5 174))
-                   (list (list (make-message :id :bitfield
-                                             :data #*10101110)))))
+  (store-and-check
+   '(#(0 0 0 2 5 174))
+   (list (list (make-message :id :bitfield
+                             :data #*10101110)))))
 
 (test bitfield-message-with-padding
-  (store-and-check '(#(0 0 0 2 5 174))
-                   (list (list (make-message :id :bitfield
-                                             :data #*1010111)))
-                   7))
+  (store-and-check
+   '(#(0 0 0 2 5 174))
+   (list (list (make-message :id :bitfield
+                             :data #*1010111)))
+   7))
 
 (test bitfield-message-multiple-bytes
-  (store-and-check '(#(0 0 0 3 5 174 240))
-                   (list (list (make-message :id :bitfield
-                                             :data #*101011101111000)))
-                   15))
+  (store-and-check
+   '(#(0 0 0 3 5 174 240))
+   (list (list (make-message :id :bitfield
+                             :data #*101011101111000)))
+   15))
 
 (test piece-message
   (store-and-check '(#(0 0 0 19 7
@@ -135,26 +138,26 @@
 (test roundtrip-interested (survives-roundtrip (make-message :id :interested)))
 (test roundtrip-not-interested (survives-roundtrip (make-message :id :not-interested)))
 (test roundtrip-have
-      (survives-roundtrip
-       (make-message :id :have :data 1231344)))
+  (survives-roundtrip
+   (make-message :id :have :data 1231344)))
 (test roundtrip-request
-      (survives-roundtrip
-       (make-message :id :request
-                     :data '(:index 0
-                             :begin 424242
-                             :length 12345))))
+  (survives-roundtrip
+   (make-message :id :request
+                 :data '(:index 0
+                         :begin 424242
+                         :length 12345))))
 (test roundtrip-cancel
-      (survives-roundtrip
-       (make-message :id :cancel
-                     :data '(:index 0
-                             :begin 123144
-                             :length 1))))
+  (survives-roundtrip
+   (make-message :id :cancel
+                 :data '(:index 0
+                         :begin 123144
+                         :length 1))))
 (test roundtrip-bitfield
-      (survives-roundtrip
-       (make-message :id :bitfield :data #*0100101001)))
+  (survives-roundtrip
+   (make-message :id :bitfield :data #*0100101001)))
 (test roundtrip-piece
-      (survives-roundtrip
-       (make-message :id :piece
-                     :data '(:index 12
-                             :begin 12345
-                             :block #(1 2 3 4 5 6 7 8 9 10)))))
+  (survives-roundtrip
+   (make-message :id :piece
+                 :data '(:index 12
+                         :begin 12345
+                         :block #(1 2 3 4 5 6 7 8 9 10)))))

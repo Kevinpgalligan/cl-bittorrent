@@ -270,7 +270,7 @@
 (def-client-test sends-keepalives
   (let* ((torrent (make-test-torrent))
          (t2 (- *curr-time*
-                bito::*max-idle-time*
+                bito::*time-until-sending-keep-alive*
                 (- 1)))
          ;; Should send keepalive to first but not second.
          (ps1 (make-peer-state torrent
@@ -298,7 +298,7 @@
          (ps2 (make-peer-state torrent 0 2))
          (client (make-test-client torrent (list ps1 ps2))))
     ;; Won't send if we haven't downloaded any bytes.
-    (incf (bito::downloaded-bytes client) 10)
+    (incf (bito::pieces-downloaded client))
     (setf (bito::have-sent-p ps1) t)
     (bito::maybe-send-bitfield client)
     (is-true (bito::qempty-p (bito::queue ps1)))

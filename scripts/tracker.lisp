@@ -1,4 +1,4 @@
-;; Used to generate a response for the dummy tracker.
+;; Used to generate a dummy tracker response.
 ;; The torrent file at data/for-tests.torrent directs to
 ;; 127.0.0.1:4242/announce, which is the address that the "tracker" should
 ;; be listening on.

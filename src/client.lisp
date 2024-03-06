@@ -10,21 +10,29 @@ terms of the number of 'choke update' intervals.")
 (defparameter *control-queue-timeout* 0.1)
 (defparameter *max-idle-time*
   (* internal-time-units-per-second 120))
+(defparameter *time-until-sending-keep-alive*
+  (* 3/4 *max-idle-time*))
 (defparameter *piece-request-timeout*
   (* internal-time-units-per-second 120))
 
 (defparameter *max-concurrent-piece-requests* 4)
 
-(defun download-torrent (torrent-path download-path &optional start-piecemap)
+(defun download-torrent (torrent-path download-path
+                         &key start-piecemap
+                           (debug-p nil)
+                           (log-level :info))
   "Start torrenting based on file at TORRENT-PATH, files are saved to
 base directory DOWNLOAD-PATH. PIECEMAP is a bit vector specifying which
 pieces have already been downloaded, if any."
+  (log:config log-level)
   (let* ((torrent (load-torrent-file torrent-path))
          (base-path (uiop:merge-pathnames* (dirname torrent) download-path))
          (piecemap (or start-piecemap
                        (make-array (num-pieces torrent) :element-type 'bit)))
          (tracker-url (random-http-tracker torrent)))
     (log:info "Loaded torrent with info hash: ~a" (info-hash torrent))
+    (loop for filespec in (files torrent)
+          do (add-base-path base-path filespec))
     (multiple-value-bind (listen-sock port)
         (attempt-open-bittorrent-socket)
       (when (null listen-sock)
@@ -52,7 +60,8 @@ pieces have already been downloaded, if any."
                  (make-client peer-id torrent port base-path tracker-url
                               piecemap listen-sock
                               (interval tracker-response)
-                              (peers tracker-response))))))
+                              (peers tracker-response)
+                              :debug-p debug-p)))))
         (when listen-sock
           (usocket:socket-close listen-sock))))))
 
@@ -99,12 +108,14 @@ pieces have already been downloaded, if any."
                          :accessor outstanding-requests)
    (pieces-downloaded :initarg :pieces-downloaded :accessor pieces-downloaded)
    (download-complete-p :initarg :download-complete-p
-                        :accessor download-complete-p)))
+                        :accessor download-complete-p)
+   (debug-p :initarg :debug-p :reader debug-p)))
 
 (defun make-client (id torrent port base-path tracker-url
                     piecemap listen-sock tracker-interval peers
                     &key (time-now (get-time-now))
-                      peer-states)
+                      peer-states
+                      debug-p)
   (let* ((peer-states
            (or peer-states
                (loop for peer in peers
@@ -142,7 +153,8 @@ pieces have already been downloaded, if any."
      :partial-pieces (make-hash-table)
      :outstanding-requests nil
      :pieces-downloaded num-pieces-already
-     :download-complete-p (= num-pieces-already (num-pieces torrent)))))
+     :download-complete-p (= num-pieces-already (num-pieces torrent))
+     :debug-p debug-p)))
 
 (defun make-download-state ()
   (make-instance 'download-state :uploaded 0 :downloaded 0))
@@ -217,13 +229,16 @@ pieces have already been downloaded, if any."
       client
     (loop for peer in peers
           for ps in peer-states 
-          do (spin-up-peer-thread torrent id ps control-queue :peer peer))))
+          do (spin-up-peer-thread torrent id ps control-queue
+                                  :peer peer
+                                  :debug-p (debug-p client)))))
 
-(defun spin-up-peer-thread (torrent id peer-state control-queue &key peer sock)
+(defun spin-up-peer-thread (torrent id peer-state control-queue
+                            &key peer sock debug-p)
   (bt:make-thread
    (lambda ()
      (peer-loop torrent id (queue peer-state) control-queue
-                (index peer-state) :peer peer :sock sock))))
+                (index peer-state) :peer peer :sock sock :debug-p debug-p))))
 
 (defun prune-idle-peers (client)
   (map nil
@@ -321,7 +336,7 @@ state in the client associated with that peer."
               #'downloaded-bytes-sum))
         (worst-amount 0))
     (loop for ps in peer-states
-          when (and (not (= (index ps) optimistic-unchoke))
+          when (and (not (eq (index ps) optimistic-unchoke))
                     (they-interested ps)
                     (or (< (length best) *peers-to-unchoke*)
                         (>= (funcall sum-to-optimise ps) worst-amount)))
@@ -358,10 +373,9 @@ state in the client associated with that peer."
           (cons 0 (butlast (slot-value ps bytes-slot))))))
 
 (defun send-to-peer (peer-state message-id &optional data)
-  ;; Would like to log the data but not sure how to avoid dumping a massive
-  ;; payload to the log, there's a way to limit how much to print.
   (log:info "Sending ~a message to peer ~a"
             message-id (index peer-state))
+  (log-peer-message-in-detail message-id data)
   (qpush (queue peer-state)
          (queue-message :tag :peer-message
                         :contents (make-message :id message-id
@@ -502,6 +516,7 @@ the peer."
                  (incf (pieces-downloaded client))
                  (when (= (pieces-downloaded client)
                           (num-pieces (torrent client)))
+                   (log:info "Finished downloading all files!")
                    (setf (download-complete-p client) t))
                  ;; Let everyone know we have this piece now.
                  (prepare-peer-message client :all :have piece-index)
@@ -539,7 +554,7 @@ the peer."
     ((member id '(:have :request :cancel))
      (log:info "Message contents: ~a" data))
     ((eq id :piece)
-     (log:info "Message contents: index=~a, begin=~a, block=~a"
+     (log:info "Message contents: index=~a, begin=~a, length of block=~a"
                (getf data :index)
                (getf data :begin)
                (length (getf data :block))))
@@ -753,7 +768,7 @@ the peer."
 (defun maybe-send-bitfield (client)
   ;; We can only send the bitfield as our first message to
   ;; a peer, but no point sending it if we don't have any pieces.
-  (when (not (zerop (downloaded-bytes client)))
+  (when (not (zerop (pieces-downloaded client)))
     (loop for ps in (peer-states client)
           when (not (have-sent-p ps))
             do (send-to-peer ps :bitfield (piecemap client)))))
@@ -808,7 +823,8 @@ the peer."
 (defun send-keepalives (client)
   (let ((now (get-time-now)))
     (loop for ps in (peer-states client)
-          when (> (- now (last-send-time ps)) *max-idle-time*)
+          when (> (- now (last-send-time ps))
+                  *time-until-sending-keep-alive*)
             do (send-to-peer ps :keep-alive))))
 
 (defun connect-to-new-peers (client)

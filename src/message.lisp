@@ -168,7 +168,6 @@ message could be read."
 
 (defun parse-bitfield-message (msg-buff)
   (with-slots (num-pieces) msg-buff
-    ;; Subtract 1 byte for the ID field.
     (let ((bitfield-size (* 8 (bytes-remaining msg-buff))))
       (when (not (and (>= bitfield-size num-pieces)
                       (< bitfield-size (+ 8 num-pieces))))
@@ -252,7 +251,18 @@ message could be read."
   (loop with result = 0
         for i = 0 then (1+ i)
         for j = (+ i start-index)
-        while (and (< i 8)
-                   (< j (length bv)))
-        do (setf result (logior (ash result 1) (aref bv j)))
+        while (< i 8)
+        ;; Piece 0 corresponds to the high bit of the first
+        ;; byte. Bitfield layout is...
+        ;;   0 0 0 0 0 0 0 0 | 0 0 0 0 0 0 0 0 | ...
+        ;;   ^             ^
+        ;;   piece 0       piece 8
+        ;;   high bit      low bit
+        ;; So we need to keep shifting left, even if we've reached
+        ;; the end of the bit vector, so that the high bit corresponds
+        ;; to the first piece.
+        do (setf result (logior (ash result 1) 
+                                (if (>= j (length bv))
+                                    0
+                                    (aref bv j))))
         finally (return result)))

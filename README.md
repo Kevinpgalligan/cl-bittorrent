@@ -5,20 +5,6 @@ This is a BitTorrent client written in Common Lisp.
 (bittorrent:download-torrent "/path/to/file.torrent" "/download/dir/")
 ```
 
-### Missing features / wishlist
-* Pausing and resuming of downloads.
-* Ability to pick which files to download.
-* Downloading multiple torrents at a time.
-* More generally, consideration of how it could be used as a library / embedded in other applications. As it stands, there are no configuration options or hooks.
-* Resilience to errors: dropped connections, failed file writes, unresponsive tracker, etc.
-* Smarter selection of pieces for download (e.g. rarest first).
-* More faithful implementation of the choking algorithm from the spec (see design.md). Generally, more consideration of how choking/interest are handled (e.g. if a peer becomes interested, do we immediately unchoke it or do we always wait until the 10-second period has elapsed?).
-* UDP communication with trackers -- currently uses the old HTTP protocol, which most trackers don't accept anymore.
-* Let the tracker know when we've finished / are shutting down.
-* Handle case where client is in tracker's list of peers, i.e. don't try communicating with self.
-* Better tracking of upload/download rate for peers. Right now, peers could be sending us vast amounts of junk data, and we would consider them "good uploaders" & keep them unchoked. There's also no feedback from the worker threads to say that data was successfully sent to a peer.
-* A lot of data is being passed around as plists, which fail silently if there's a missing field or the wrong name is used to access a field. I don't like how fragile that is. Need to either replace the `getf`s with something that fails fast, or replace the plists with objects.
-
 ### Setup
 Clone the repo in your quicklisp local-projects/ directory, or add a symbolic link pointing to wherever you cloned it.
 
@@ -50,9 +36,23 @@ To test 2 clients talking to each other:
 
 0. Save tracker response to /tmp/ with `scripts/tracker.lisp`.
 1. Start the dummy tracker (`python3 scripts/tracker.py`).
-2. Run a client from the command-line (with `scripts/run-client` and the `for-tests.torrent` file).
+2. Run a client from the command-line (with `scripts/run-client --torrent data/for-tests.torrent --dir /tmp/`).
 3. Add that client's info (port and ID, from the logs) to the tracker. Note that the client's ID is URL-encoded and you will want to decode it using `(quri:url-decode "STRING-HERE" :encoding :latin1)`.
-4. Run another client from the REPL using `download-torrent`, this time include a bit vector as an extra argument indicating which pieces it has downloaded (in the test I'm doing, one client has all the data and the other has none). Example invocation: `(download-torrent "/path/to/cl-bittorrent/data/for-tests.torrent" "/path/to/downloaded/file/" (make-array 901 :element-type 'bit :initial-element 1))`.
+4. Run another client from the REPL using `download-torrent`, this time include a bit vector as an extra argument indicating which pieces it has downloaded (in the test I'm doing, one client has all the data and the other has none). Example invocation: `(download-torrent "/path/to/cl-bittorrent/data/for-tests.torrent" "/path/to/downloaded/file/" :start-piecemap (make-array 901 :element-type 'bit :initial-element 1) :debug t)`.
+
+### Missing features / wishlist
+* Pausing and resuming of downloads.
+* Ability to pick which files to download.
+* Downloading multiple torrents at a time.
+* More generally, consideration of how it could be used as a library / embedded in other applications. As it stands, there are no configuration options or hooks.
+* Resilience to errors: dropped connections, failed file writes, unresponsive tracker, etc.
+* Smarter selection of pieces for download (e.g. rarest first).
+* More faithful implementation of the choking algorithm from the spec (see design.md). Generally, more consideration of how choking/interest are handled (e.g. if a peer becomes interested, do we immediately unchoke it or do we always wait until the 10-second period has elapsed?).
+* UDP communication with trackers -- currently uses the old HTTP protocol, which most trackers don't accept anymore.
+* Let the tracker know when we've finished / are shutting down.
+* Handle case where client is in tracker's list of peers, i.e. don't try communicating with self.
+* Better tracking of upload/download rate for peers. Right now, peers could be sending us vast amounts of junk data, and we would consider them "good uploaders" & keep them unchoked. There's also no feedback from the worker threads to say that data was successfully sent to a peer.
+* A lot of data is being passed around as plists, which fail silently if there's a missing field or the wrong name is used to access a field. I don't like how fragile that is. Need to either replace the `getf`s with something that fails fast, or replace the plists with objects.
 
 ### References
 * <http://www.kristenwidman.com/blog/how-to-write-a-bittorrent-client-part-1/>
