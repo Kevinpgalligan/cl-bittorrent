@@ -60,7 +60,7 @@ pieces have already been downloaded, if any."
   (loop for port from 6881 below 6890
         for sock = (handler-case
                        (usocket:socket-listen
-                        "127.0.0.1" port :element-type 'flexi-streams:octet)
+                        "127.0.0.1" port :element-type '(unsigned-byte 8))
                      (condition (c)
                        (log:info
                         "Tried port ~a but failed because: ~a" port c)))
@@ -304,6 +304,10 @@ state in the client associated with that peer."
   (alexandria:random-elt xs))
 
 (defun select-peers-to-unchoke (client)
+  ;; The unchoking algorithm picks the top 4 interested peers
+  ;; by our download rate, plus a randomly-chosen peer (the optimistic
+  ;; unchoke). When the torrent is fully downloaded, they are instead
+  ;; picked based on our upload rate.
   (with-slots (peer-states optimistic-unchoke download-complete-p)
       client
     (append (get-best-peers peer-states optimistic-unchoke download-complete-p)
@@ -317,23 +321,23 @@ state in the client associated with that peer."
               #'downloaded-bytes-sum))
         (worst-amount 0))
     (loop for ps in peer-states
-          ;; Exclude the optimistic unchoke from the selection.
           when (and (not (= (index ps) optimistic-unchoke))
+                    (they-interested ps)
                     (or (< (length best) *peers-to-unchoke*)
-                        (> (funcall sum-to-optimise ps) worst-amount)))
+                        (>= (funcall sum-to-optimise ps) worst-amount)))
             do (progn
                  (push ps best)
                  (when (> (length best) *peers-to-unchoke*)
-                   (let ((worst-index (index (find-worst-uploader best sum-to-optimise))))
+                   (let ((worst-index (index (find-worst-peer best sum-to-optimise))))
                      (setf best (remove-if (lambda (i) (= i worst-index))
                                            best
                                            :key #'index))))
                  (setf worst-amount
                        (funcall sum-to-optimise
-                                (find-worst-uploader best sum-to-optimise)))))
+                                (find-worst-peer best sum-to-optimise)))))
     (mapcar #'index best)))
 
-(defun find-worst-uploader (list sum-to-optimise)
+(defun find-worst-peer (list sum-to-optimise)
   (alexandria:extremum list #'< :key sum-to-optimise))
 
 (defun update-transfer-rates (ps)
@@ -468,11 +472,13 @@ the peer."
            (setf (interested ps) t)
            (prepare-peer-message client ps :interested)))
         ((eq id :request)
-         ;; If they're choked we just drop the request.
-         (when (and (not (choked ps))
-                    (has-piece-p client (getf data :index))
-                    (not (> (getf data :length) *max-request-size*)))
-           (add-to-requests-list client ps data)))
+         (cond
+           ((invalid-request-p (torrent client) data)
+            (log:info "Dropping invalid request."))
+           ((choked ps) (log:info "Dropping request from choked peer."))
+           ((not (has-piece-p client (getf data :index)))
+            (log:info "Dropping request for piece we don't have."))
+           (t (add-to-requests-list client ps data))))
         ((eq id :piece)
          ;; If we didn't request it, ignore.
          (let ((blk (getf data :block)))
@@ -516,6 +522,17 @@ the peer."
       (setf (first-contact-p ps) nil)
       ;; Ignoring keep-alive messages but they do still have this effect.
       (setf (last-receive-time ps) (get-time-now)))))
+
+(defun invalid-request-p (torrent data)
+  (let ((len (getf data :length))
+        (begin (getf data :begin))
+        (piecelen (piece-length torrent)))
+    (or (<= len 0)
+        (< begin 0)
+        (> len *max-request-size*)
+        (> (+ len begin) piecelen)
+        (> (+ len begin (* piecelen (getf data :index)))
+           (total-length torrent)))))
 
 (defun log-peer-message-in-detail (id data)
   (cond

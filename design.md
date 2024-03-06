@@ -1,5 +1,24 @@
-### Client logic
+### Choking logic
+Here's my understanding of the choking/unchoking logic in the spec. It does not
+reflect my implementation.
 
+DOWNLOADING:
+Step 1: Get 4 downloaders ("top uploaders who are interested").
+Step 2: Any uninterested peers with a higher upload rate than those downloaders
+        gets unchoked too.
+        What if they don't declare their interest but still request pieces?
+        Do we drop their requests?
+Step 3: If those uninterested folks become interested, then the worst of the
+        downloaders gets choked.
+
+UPLOADING:
+Pick 4 peers who are downloading from us at the highest rate, who are
+interested.
+
+Should also weigh newly-connected peers higher in the optimistic unchoking, to give
+them a chance to acquire a full piece.
+
+### Client logic
 0. Init general state.
    - bit vector for pieces.
    - set directory.

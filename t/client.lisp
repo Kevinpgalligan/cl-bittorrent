@@ -116,8 +116,9 @@
                        (bito::target msg))))))
 
 (defun make-peer-states (torrent data &key uploading)
-  (loop for (id num-bytes) in data
+  (loop for (id num-bytes interested) in data
         collect (let ((ps (make-peer-state torrent *curr-time* id)))
+                  (setf (bito::they-interested ps) interested)
                   (if uploading
                       (bito::increment-uploaded-bytes ps num-bytes)
                       (bito::increment-downloaded-bytes ps num-bytes))
@@ -125,49 +126,54 @@
 
 (def-client-test choke-update-when-downloading
   (let ((torrent (make-test-torrent)))
-    (destructuring-bind (ps1 ps2 ps3 ps4 ps5 ps6)
+    (destructuring-bind (ps1 ps2 ps3 ps4 ps5 ps6 ps7)
         (make-peer-states torrent
-                          '((1 100)
-                            (2 105)
-                            (3 101)
-                            (4 90)
-                            (5 200)
-                            (6 0)))
-      (let* ((peer-states (list ps1 ps2 ps3 ps4 ps5 ps6))
+                          '((1 100 t)
+                            (2 105 t)
+                            (3 101 nil)
+                            (4 90 t)
+                            (5 200 t)
+                            (6 0 t)
+                            (7 10 t)))
+      (let* ((peer-states (list ps1 ps2 ps3 ps4 ps5 ps6 ps7))
              (client (make-test-client torrent peer-states)))
-        (bito::update-chokes client)
-        ;; Top 4 most generous peers should be unchoked.
+        (with-dynamic-stubs ((bito::get-random-element ps6))
+          (bito::update-chokes client))
+        ;; Top 4 most generous (interested) peers should be unchoked.
+        ;; And the optimistic unchoke.
         (is-false (bito::choked ps1))
         (is-false (bito::choked ps2))
-        (is-false (bito::choked ps3))
+        (is-false (bito::choked ps4))
         (is-false (bito::choked ps5))
-        ;; One of the remaining peers should be optimistically unchoked.
-        (is-true (or (and (not (bito::choked ps4)) (bito::choked ps6))
-                     (and (bito::choked ps4) (not (bito::choked ps6)))))))))
+        (is-false (bito::choked ps6))
+
+        (is-true (bito::choked ps3))
+        (is-true (bito::choked ps7))))))
 
 (def-client-test choke-update-when-uploading
   (let ((torrent (make-test-torrent)))
     (destructuring-bind (ps1 ps2 ps3 ps4 ps5 ps6)
         (make-peer-states torrent
-                          '((1 100)
-                            (2 105)
-                            (3 101)
-                            (4 90)
-                            (5 200)
-                            (6 0))
+                          '((1 100 t)
+                            (2 105 t)
+                            (3 101 t)
+                            (4 90 t)
+                            (5 200 t)
+                            (6 0 t))
                           :uploading t)
       (let* ((peer-states (list ps1 ps2 ps3 ps4 ps5 ps6))
              (client (make-test-client torrent peer-states)))
         (setf (bito::download-complete-p client) t)
-        (bito::update-chokes client)
-        ;; Top 4 most generous peers should be unchoked.
+
+        (with-dynamic-stubs ((bito::get-random-element ps6))
+          (bito::update-chokes client))
+
         (is-false (bito::choked ps1))
         (is-false (bito::choked ps2))
         (is-false (bito::choked ps3))
+        (is-true (bito::choked ps4))
         (is-false (bito::choked ps5))
-        ;; One of the remaining peers should be optimistically unchoked.
-        (is-true (or (and (not (bito::choked ps4)) (bito::choked ps6))
-                     (and (bito::choked ps4) (not (bito::choked ps6)))))))))
+        (is-false (bito::choked ps6))))))
 
 (defun find-pending-message (client target &optional id)
   (find (list :target target :id id)
@@ -181,12 +187,12 @@
   (let ((torrent (make-test-torrent)))
     (destructuring-bind (ps1 ps2 ps3 ps4 ps5 ps6)
         (make-peer-states torrent
-                          '((1 100)
-                            (2 100)
-                            (3 100)
-                            (4 100)
-                            (5 0)
-                            (6 0)))
+                          '((1 100 t)
+                            (2 100 t)
+                            (3 100 t)
+                            (4 100 t)
+                            (5 0 t)
+                            (6 0 t)))
       (let* ((peer-states (list ps1 ps2 ps3 ps4 ps5 ps6))
              (client (make-test-client torrent peer-states)))
         (with-dynamic-stubs ((bito::get-random-element ps5))
@@ -665,15 +671,23 @@
 
 (def-message-test handles-requests
   (bito::mark-piece client 0)
+  (bito::mark-piece client 9)
   ;; They're choked, ignore.
   (push-msg q 1 :request '(:index 0 :begin 0 :length 40))
   ;; Not choked, reply.
   (setf (bito::choked ps2) nil)
   (push-msg q 2 :request '(:index 0 :begin 0 :length 40))
   ;; Request too big, ignore.
-  (push-msg q 3 :request '(:index 0 :begin 0 :length 17000))
+  (push-msg q 2 :request '(:index 0 :begin 0 :length 17000))
   ;; We don't have this piece, ignore.
-  (push-msg q 3 :request '(:index 1 :begin 0 :length 40))
+  (push-msg q 2 :request '(:index 1 :begin 0 :length 40))
+  ;; Piece doesn't exist.
+  (push-msg q 2 :request '(:index 50 :begin 0 :length 40))
+  ;; Various other nonsensical requests.
+  (push-msg q 2 :request '(:index 0 :begin -1 :length 40))
+  (push-msg q 2 :request '(:index 9 :begin 90 :length 40))
+  (push-msg q 2 :request '(:index 0 :begin 130 :length 10))
+  (push-msg q 2 :request '(:index 0 :begin 130 :length 0))
 
   (bito::process-messages client)
 

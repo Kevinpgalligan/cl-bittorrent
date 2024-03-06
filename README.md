@@ -1,16 +1,23 @@
-### Description
-A BitTorrent client in Common Lisp.
+## cl-bittorrent
+This is a BitTorrent client written in Common Lisp.
 
-The minimum additions to make this actually useful:
+```lisp
+(bittorrent:download-torrent "/path/to/file.torrent" "/download/dir/")
+```
 
+### Missing features / wishlist
 * Pausing and resuming of downloads.
 * Ability to pick which files to download.
+* Downloading multiple torrents at a time.
+* More generally, consideration of how it could be used as a library / embedded in other applications. As it stands, there are no configuration options or hooks.
 * Resilience to errors: dropped connections, failed file writes, unresponsive tracker, etc.
 * Smarter selection of pieces for download (e.g. rarest first).
-* UDP communication with trackers (currently uses the old HTTP protocol, which most trackers don't accept anymore).
+* More faithful implementation of the choking algorithm from the spec (see design.md). Generally, more consideration of how choking/interest are handled (e.g. if a peer becomes interested, do we immediately unchoke it or do we always wait until the 10-second period has elapsed?).
+* UDP communication with trackers -- currently uses the old HTTP protocol, which most trackers don't accept anymore.
 * Let the tracker know when we've finished / are shutting down.
 * Handle case where client is in tracker's list of peers, i.e. don't try communicating with self.
 * Better tracking of upload/download rate for peers. Right now, peers could be sending us vast amounts of junk data, and we would consider them "good uploaders" & keep them unchoked. There's also no feedback from the worker threads to say that data was successfully sent to a peer.
+* A lot of data is being passed around as plists, which fail silently if there's a missing field or the wrong name is used to access a field. I don't like how fragile that is. Need to either replace the `getf`s with something that fails fast, or replace the plists with objects.
 
 ### Setup
 Clone the repo in your quicklisp local-projects/ directory, or add a symbolic link pointing to wherever you cloned it.
@@ -19,12 +26,6 @@ Then:
 
 ```lisp
 (ql:quickload 'bittorrent)
-```
-
-### Usage
-```lisp
-(in-package bittorrent)
-(download-torrent "/path/to/file.torrent" "/path/to/downloads/")
 ```
 
 ### Testing
