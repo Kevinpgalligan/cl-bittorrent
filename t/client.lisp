@@ -552,7 +552,8 @@
      (let* ((torrent (make-test-torrent))
             (ps1 (make-peer-state torrent 0 1))
             (ps2 (make-peer-state torrent 0 2))
-            (client (make-test-client torrent (list ps1 ps2)))
+            (ps3 (make-peer-state torrent 0 3))
+            (client (make-test-client torrent (list ps1 ps2 ps3)))
             (q (bito::control-queue client)))
        ,@body)))
 
@@ -599,11 +600,202 @@
   (is-true (bito::they-interested ps1))
   (is-false (bito::they-interested ps2)))
 
-;;;; OTHER TESTS
-;; 1. have
-;; 2. bitfield
-;; 3. request
-;; 4. piece
-;; 5. cancel
+(defun verify-pending-messages (client exp-msgs)
+  (let ((msgs (bito::pending-messages client)))
+    (is (= (length exp-msgs) (length msgs)))
+    (loop for msg in msgs
+          for exp-msg in exp-msgs
+          do (progn
+               (is (eq (bito::target exp-msg) (bito::target msg)))
+               (is (eq (bito::message-id exp-msg)
+                       (bito::message-id msg)))
+               (is (equalp (bito::data exp-msg)
+                           (bito::data msg)))))))
 
-;; q: are we unchoking interested people?
+(def-message-test handles-haves
+  (bito::mark-piece client 0)
+  (push-msg q 1 :have 0)
+  (setf (bito::interested ps2) t)
+  (bito::set-piecemap client ps2 #*1011010000)
+  (push-msg q 2 :have 1)
+  (push-msg q 3 :have 1)
+
+  (bito::process-messages client)
+
+  (is-false (bito::interested ps1))
+  (is-true (bito::interested ps2))
+  (is-true (bito::interested ps3))
+  (is (equalp #*1000000000 (bito::piecemap ps1)))
+  (is (equalp #*1111010000 (bito::piecemap ps2)))
+  (is (equalp #*0100000000 (bito::piecemap ps3)))
+  (verify-pending-messages
+   client
+   (list (make-instance 'bito::pending-peer-message
+                        :target ps3
+                        :message-id :interested
+                        :data nil))))
+
+(def-message-test handles-bitfields
+  ;; This peer is sending their bitfield too late, so we ignore it.
+  (setf (bito::first-contact-p ps1) nil)
+  (push-msg q 1 :bitfield #*1100110011)
+  ;; This one is only sending pieces we have already. Not interested.
+  (bito::mark-piece client 0)
+  (push-msg q 2 :bitfield #*1000000000)
+  ;; We're interested in this one.
+  (push-msg q 3 :bitfield #*0111000000)
+
+  (bito::process-messages client)
+
+  (is-false (bito::interested ps1))
+  (is-false (bito::interested ps2))
+  (is-true (bito::interested ps3))
+  (is (equalp #*0000000000 (bito::piecemap ps1)))
+  (is (equalp #*1000000000 (bito::piecemap ps2)))
+  (is (equalp #*0111000000 (bito::piecemap ps3)))
+  (is (= 0 (bito::num-desired-pieces ps1)))
+  (is (= 0 (bito::num-desired-pieces ps2)))
+  (is (= 3 (bito::num-desired-pieces ps3)))
+  (verify-pending-messages
+   client
+   (list (make-instance 'bito::pending-peer-message
+                        :target ps3
+                        :message-id :interested
+                        :data nil))))
+
+(def-message-test handles-requests
+  (bito::mark-piece client 0)
+  ;; They're choked, ignore.
+  (push-msg q 1 :request '(:index 0 :begin 0 :length 40))
+  ;; Not choked, reply.
+  (setf (bito::choked ps2) nil)
+  (push-msg q 2 :request '(:index 0 :begin 0 :length 40))
+  ;; Request too big, ignore.
+  (push-msg q 3 :request '(:index 0 :begin 0 :length 17000))
+  ;; We don't have this piece, ignore.
+  (push-msg q 3 :request '(:index 1 :begin 0 :length 40))
+
+  (bito::process-messages client)
+
+  (is (= 1 (length (bito::requests-list client))))
+  (is (bito::piece-request-eq
+       (bito::make-piece-request ps2 '(:index 0 :begin 0 :length 40))
+       (first (bito::requests-list client)))))
+
+(def-message-test handles-cancels
+  (push (bito::make-piece-request ps1 '(:index 0 :begin 0 :length 40))
+        (bito::requests-list client))
+  (push-msg q 1 :cancel '(:index 0 :begin 0 :length 40))
+
+  (bito::process-messages client)
+
+  (is-false (bito::requests-list client)))
+
+(def-message-test handles-unrequested-piece
+  (push (make-instance 'bito::outstanding-request
+                       :peer-index 1
+                       :piece-index 0
+                       :block-begin-index 0
+                       :len 100
+                       :request-time *curr-time*)
+        (bito::outstanding-requests client))
+  (push-msg q 1 :piece '(:index 0
+                         :begin 10
+                         :block #(1 2 3 4 5)))
+
+  (with-dynamic-stubs ((bito::store-block nil))
+    (bito::process-messages client)
+
+    (is (= 0 (call-times-for 'bito::store-block)))
+    (is (= 0 (bito::downloaded-bytes-sum ps1)))
+    (is (= 1 (length (bito::outstanding-requests client))))))
+
+(def-client-test handles-requested-pieces
+  (let* ((piece-path "/tmp/piece")
+         (data (make-array 100 :element-type '(unsigned-byte)
+                               :initial-contents
+                               (loop for i from 0 below 100
+                                     collect i)))
+         (torrent
+           (make-instance 'torrent
+                          :metainfo nil
+                          :tracker-list nil
+                          :info-hash nil
+                          :dirname nil
+                          :files (list (make-filespec "/tmp/piece" 100))
+                          :total-length 100
+                          :piece-length 100
+                          :piece-hashes (list (bito::compute-sha1 data))
+                          :num-pieces 1
+                          :max-block-size 50))
+         (ps1 (make-peer-state torrent 0 1))
+         (client (make-test-client torrent (list ps1)))
+         (q (bito::control-queue client)))
+    (bito::mark-piece ps1 0)
+    (setf (bito::interested ps1) t)
+    (setf (bito::num-desired-pieces ps1) 1)
+    (push (make-instance 'bito::outstanding-request
+                         :peer-index 1
+                         :piece-index 0
+                         :block-begin-index 0
+                         :len 50
+                         :request-time 0)
+          (bito::outstanding-requests client))
+    (push (make-instance 'bito::outstanding-request
+                         :peer-index 1
+                         :piece-index 0
+                         :block-begin-index 50
+                         :len 50
+                         :request-time 0)
+          (bito::outstanding-requests client))
+
+    (push-msg q 1 :piece (list
+                          :index 0
+                          :begin 50
+                          :block (subseq data 50 100)))
+    (bito::process-messages client)
+
+    (is (= 50 (bito::downloaded-bytes-sum ps1)))
+    (is (= 1 (length (bito::outstanding-requests client))))
+    (is (= 1 (hash-table-count (bito::partial-pieces client))))
+    (is (= 0 (bito::pieces-downloaded client)))
+    (is-false (bito::has-piece-p client 0))
+    (is-false (bito::download-complete-p client))
+    (is-true (bito::interested ps1))
+
+    (push-msg q 1 :piece (list
+                          :index 0
+                          :begin 0
+                          :block (subseq data 0 50)))
+    (bito::process-messages client)
+
+    (is (= 100 (bito::downloaded-bytes-sum ps1)))
+    (is-false (bito::interested ps1))
+    (is (= 0 (bito::num-desired-pieces ps1)))
+    (is (= 0 (length (bito::outstanding-requests client))))
+    (is (= 0 (hash-table-count (bito::partial-pieces client))))
+    (is (= 1 (bito::pieces-downloaded client)))
+    (is-true (bito::has-piece-p client 0))
+    (is-true (bito::download-complete-p client))
+    (verify-pending-messages
+     client
+     (list
+      (make-instance 'bito::pending-peer-message
+                     :target ps1
+                     :message-id :not-interested
+                     :data nil)
+      (make-instance 'bito::pending-peer-message
+                     :target :all
+                     :message-id :have
+                     :data 0)))
+    (let ((exists (uiop:file-exists-p piece-path))
+          (buffer (make-array 100 :element-type '(unsigned-byte 8))))
+      (is-true exists)
+      (when exists
+        (with-open-file (f piece-path :element-type '(unsigned-byte 8))
+          (let ((correct-length-p (= 100 (file-length f))))
+            (is-true correct-length-p)
+            (when correct-length-p
+              (read-sequence buffer f)
+              (is (equalp data buffer))))
+          (uiop:delete-file-if-exists piece-path))))))

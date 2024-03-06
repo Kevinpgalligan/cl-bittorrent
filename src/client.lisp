@@ -463,8 +463,8 @@ the peer."
          (setf (they-interested ps) (eq id :interested)))
         ((member id '(:have :bitfield))
          (update-piecemaps client ps data)
-         (when (and (should-be-interested-p ps)
-                    (not (interested ps)))
+         (when (and (not (interested ps))
+                    (should-be-interested-p ps))
            (setf (interested ps) t)
            (prepare-peer-message client ps :interested)))
         ((eq id :request)
@@ -475,38 +475,39 @@ the peer."
            (add-to-requests-list client ps data)))
         ((eq id :piece)
          ;; If we didn't request it, ignore.
-         (alexandria:when-let
-             ((req (find-outstanding-block-request
-                    client
-                    (index ps)
-                    (getf data :index)
-                    (getf data :begin)
-                    (getf data :length))))
-           ;; We haven't confirmed the validity of the piece, peers could send
-           ;; large streams of junk, we'd discard the resulting pieces, but they'd
-           ;; still be considered a "generous" peer.
-           (increment-downloaded-bytes ps (getf data :length))
-           (setf (outstanding-requests client)
-                 (remove req (outstanding-requests client)))
-           (store-block client data)
-           (let ((piece-index (getf data :index)))
-             (when (has-piece-p client piece-index)
-               (log:info "Finished piece ~a." piece-index)
-               (incf (pieces-downloaded client))
-               (when (= (pieces-downloaded client)
-                        (num-pieces (torrent client)))
-                 (setf (download-complete-p client) t))
-               ;; Let everyone know we have this piece now.
-               (prepare-peer-message client :all :have piece-index)
-               ;; Update whether we're interested in peers now.
-               (map nil
-                    (lambda (ps)
-                      (when (has-piece-p ps piece-index)
-                        (decf (num-desired-pieces ps))
-                        (when (zerop (num-desired-pieces ps))
-                          (setf (interested ps) nil)
-                          (prepare-peer-message client ps :not-interested))))
-                    (peer-states client))))))
+         (let ((blk (getf data :block)))
+           (alexandria:when-let
+               ((req (find-outstanding-block-request
+                      client
+                      (index ps)
+                      (getf data :index)
+                      (getf data :begin)
+                      (length blk))))
+             ;; We haven't confirmed the validity of the piece, peers could send
+             ;; large streams of junk, we'd discard the resulting pieces, but they'd
+             ;; still be considered a "generous" peer.
+             (increment-downloaded-bytes ps (length blk))
+             (setf (outstanding-requests client)
+                   (remove req (outstanding-requests client)))
+             (store-block client data)
+             (let ((piece-index (getf data :index)))
+               (when (has-piece-p client piece-index)
+                 (log:info "Finished piece ~a." piece-index)
+                 (incf (pieces-downloaded client))
+                 (when (= (pieces-downloaded client)
+                          (num-pieces (torrent client)))
+                   (setf (download-complete-p client) t))
+                 ;; Let everyone know we have this piece now.
+                 (prepare-peer-message client :all :have piece-index)
+                 ;; Update whether we're interested in peers now.
+                 (map nil
+                      (lambda (ps)
+                        (when (has-piece-p ps piece-index)
+                          (decf (num-desired-pieces ps))
+                          (when (zerop (num-desired-pieces ps))
+                            (setf (interested ps) nil)
+                            (prepare-peer-message client ps :not-interested))))
+                      (peer-states client)))))))
         ((eq id :cancel)
          (setf (requests-list client)
                (remove (make-piece-request ps data)
@@ -530,13 +531,13 @@ the peer."
 
 (defun update-piecemaps (client peer-state x)
   (if (integerp x)
-      (when (has-piece-p peer-state x)
+      (when (not (has-piece-p peer-state x))
         (mark-piece peer-state x)
         (when (not (has-piece-p client x))
           (incf (num-desired-pieces peer-state))))
       ;; It's a bitfield, only allowed as the first message.
       (when (first-contact-p peer-state)
-        (set-piecemap peer-state x))))
+        (set-piecemap client peer-state x))))
 
 (defun has-piece-p (obj i)
   (let ((pm (piecemap obj)))
@@ -551,10 +552,11 @@ the peer."
 (defun should-be-interested-p (peer-state)
   (> (num-desired-pieces peer-state) 0))
 
-(defun set-piecemap (peer-state bitfield)
+(defun set-piecemap (client peer-state bitfield)
   (bit-ior (piecemap peer-state) bitfield t)
   (setf (num-desired-pieces peer-state)
-        (count-bits (piecemap peer-state))))
+        (count-bits (bit-andc2 (piecemap peer-state)
+                               (piecemap client)))))
 
 (defun count-bits (bv)
   (loop for b across bv sum b))
@@ -594,11 +596,11 @@ the peer."
     (let* ((b (make-block (getf block-data :index)
                           (getf block-data :begin)
                           (getf block-data :block)))
-           (partial-piece (get-partial-piece client (index b)))
-           (piece-start (* (index b) (piece-length torrent))))
+           (partial-piece (get-partial-piece client (piece-index b)))
+           (piece-start (* (piece-index b) (piece-length torrent))))
       (when (null partial-piece)
         (setf partial-piece
-              (make-partial-piece (index b)
+              (make-partial-piece (piece-index b)
                                   piece-start
                                   (min (+ piece-start (piece-length torrent))
                                        (total-length torrent))))
