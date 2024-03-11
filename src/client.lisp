@@ -20,10 +20,13 @@ terms of the number of 'choke update' intervals.")
 (defun download-torrent (torrent-path download-path
                          &key start-piecemap
                            (debug-p nil)
-                           (log-level :info))
+                           (log-level :info)
+                           log-path)
   "Start torrenting based on file at TORRENT-PATH, files are saved to
 base directory DOWNLOAD-PATH. PIECEMAP is a bit vector specifying which
 pieces have already been downloaded, if any."
+  (when log-path
+    (log:config :daily log-path :backup nil))
   (log:config log-level)
   (let* ((torrent (load-torrent-file torrent-path))
          (base-path (uiop:merge-pathnames* (dirname torrent) download-path))
@@ -271,7 +274,7 @@ state in the client associated with that peer."
                                *piece-request-timeout*))
                           (outstanding-requests client))))
     (loop for req in timed-out-reqs
-          do (log:info "Pruning timed-out piece request: ~a ~a ~a ~a"
+          do (log:debug "Pruning timed-out piece request: ~a ~a ~a ~a"
                        (peer-index req)
                        (piece-index req)
                        (block-begin-index req)
@@ -282,7 +285,7 @@ state in the client associated with that peer."
 
 (defun maybe-update-chokes (client)
   (when (time-to-update? client)
-    (log:info "Updating chokes!")
+    (log:debug "Updating chokes!")
     (update-chokes client)
     (setf (last-update-time client) (get-time-now))
     (setf (optimistic-unchoke-count client)
@@ -297,13 +300,17 @@ state in the client associated with that peer."
   (with-slots (optimistic-unchoke-count optimistic-unchoke
                peer-states)
       client
-    (when (and peer-states (zerop optimistic-unchoke-count))
-      ;; Time to update which peer we're optimistically unchoking.
-      (setf optimistic-unchoke 
-            (index (get-random-element peer-states))))
-    (log:info "Optimistically unchoking: ~a" optimistic-unchoke)
+    (if peer-states
+        (when (zerop optimistic-unchoke-count)
+          ;; Time to update which peer we're optimistically unchoking.
+          (setf optimistic-unchoke 
+                (index (get-random-element peer-states))))
+        ;; Clear the optimistic unchoke, just in case it's still set
+        ;; after the connection with that peer was ended.
+        (setf optimistic-unchoke nil))
+    (log:debug "Optimistically unchoking: ~a" optimistic-unchoke)
     (let ((next-unchoked (select-peers-to-unchoke client)))
-      (log:info "Unchoke list: ~a" next-unchoked)
+      (log:debug "Unchoke list: ~a" next-unchoked)
       (loop for ps in peer-states
             do (update-transfer-rates ps)
             do (let* ((now-choked? (not (member (index ps) next-unchoked)))
@@ -373,9 +380,9 @@ state in the client associated with that peer."
           (cons 0 (butlast (slot-value ps bytes-slot))))))
 
 (defun send-to-peer (peer-state message-id &optional data)
-  (log:info "Sending ~a message to peer ~a"
-            message-id (index peer-state))
-  (log-peer-message-in-detail message-id data)
+  (log:debug "Sending ~a message to peer ~a; ~a"
+             message-id (index peer-state)
+             (format-peer-message-data message-id data))
   (qpush (queue peer-state)
          (queue-message :tag :peer-message
                         :contents (make-message :id message-id
@@ -469,8 +476,8 @@ the peer."
   ;; standard / should be gleanable from the message-parsing. Here, we don't
   ;; send any messages to peers, we just queue up messages for later.
   (with-slots (id data) msg
-    (log:info "Received ~a message from peer ~a" id peer-index)
-    (log-peer-message-in-detail id data)
+    (log:debug "Received ~a message from peer ~a; ~a"
+               id peer-index (format-peer-message-data id data))
     (let ((ps (get-peer-state client peer-index)))
       (cond
         ((member id '(:choke :unchoke))
@@ -488,47 +495,50 @@ the peer."
         ((eq id :request)
          (cond
            ((invalid-request-p (torrent client) data)
-            (log:info "Dropping invalid request."))
-           ((choked ps) (log:info "Dropping request from choked peer."))
+            (log:debug "Dropping invalid request."))
+           ((choked ps) (log:debug "Dropping request from choked peer."))
            ((not (has-piece-p client (getf data :index)))
-            (log:info "Dropping request for piece we don't have."))
+            (log:debug "Dropping request for piece we don't have."))
            (t (add-to-requests-list client ps data))))
         ((eq id :piece)
          ;; If we didn't request it, ignore.
-         (let ((blk (getf data :block)))
-           (alexandria:when-let
-               ((req (find-outstanding-block-request
+         (let* ((blk (getf data :block))
+                (req (find-outstanding-block-request
                       client
                       (index ps)
                       (getf data :index)
                       (getf data :begin)
                       (length blk))))
-             ;; We haven't confirmed the validity of the piece, peers could send
-             ;; large streams of junk, we'd discard the resulting pieces, but they'd
-             ;; still be considered a "generous" peer.
-             (increment-downloaded-bytes ps (length blk))
-             (setf (outstanding-requests client)
-                   (remove req (outstanding-requests client)))
-             (store-block client data)
-             (let ((piece-index (getf data :index)))
-               (when (has-piece-p client piece-index)
-                 (log:info "Finished piece ~a." piece-index)
-                 (incf (pieces-downloaded client))
-                 (when (= (pieces-downloaded client)
-                          (num-pieces (torrent client)))
-                   (log:info "Finished downloading all files!")
-                   (setf (download-complete-p client) t))
-                 ;; Let everyone know we have this piece now.
-                 (prepare-peer-message client :all :have piece-index)
-                 ;; Update whether we're interested in peers now.
-                 (map nil
-                      (lambda (ps)
-                        (when (has-piece-p ps piece-index)
-                          (decf (num-desired-pieces ps))
-                          (when (zerop (num-desired-pieces ps))
-                            (setf (interested ps) nil)
-                            (prepare-peer-message client ps :not-interested))))
-                      (peer-states client)))))))
+           (if (null req)
+               (log:debug
+                "Piece message does not correspond to outstanding request, dropping.")
+               (progn
+                 ;; We haven't confirmed the validity of the piece, peers
+                 ;; could send large streams of junk, we'd discard the
+                 ;; resulting pieces, but they'd still be considered a
+                 ;; "generous" peer.
+                 (increment-downloaded-bytes ps (length blk))
+                 (setf (outstanding-requests client)
+                       (remove req (outstanding-requests client)))
+                 (store-block client data)
+                 (let ((piece-index (getf data :index)))
+                   (when (has-piece-p client piece-index)
+                     (incf (pieces-downloaded client))
+                     (when (= (pieces-downloaded client)
+                              (num-pieces (torrent client)))
+                       (log:info "Finished downloading all files!")
+                       (setf (download-complete-p client) t))
+                     ;; Let everyone know we have this piece now.
+                     (prepare-peer-message client :all :have piece-index)
+                     ;; Update whether we're interested in peers now.
+                     (map nil
+                          (lambda (ps)
+                            (when (has-piece-p ps piece-index)
+                              (decf (num-desired-pieces ps))
+                              (when (zerop (num-desired-pieces ps))
+                                (setf (interested ps) nil)
+                                (prepare-peer-message client ps :not-interested))))
+                          (peer-states client))))))))
         ((eq id :cancel)
          (setf (requests-list client)
                (remove (make-piece-request ps data)
@@ -549,17 +559,19 @@ the peer."
         (> (+ len begin (* piecelen (getf data :index)))
            (total-length torrent)))))
 
-(defun log-peer-message-in-detail (id data)
-  (cond
-    ((member id '(:have :request :cancel))
-     (log:info "Message contents: ~a" data))
-    ((eq id :piece)
-     (log:info "Message contents: index=~a, begin=~a, length of block=~a"
-               (getf data :index)
-               (getf data :begin)
-               (length (getf data :block))))
-    ((eq id :bitfield)
-     (log:info "Message contents: has ~a pieces" (count-bits data)))))
+(defun format-peer-message-data (id data)
+  (format nil "~a"
+          (cond
+            ((member id '(:have :request :cancel)) data)
+            ((eq id :piece)
+             (format nil
+                     "(index=~a, begin=~a, length of block=~a)"
+                     (getf data :index)
+                     (getf data :begin)
+                     (length (getf data :block))))
+            ((eq id :bitfield)
+             (format nil "has ~a pieces" (count-bits data)))
+            (t ""))))
 
 (defun update-piecemaps (client peer-state x)
   (if (integerp x)
@@ -637,8 +649,8 @@ the peer."
                                   (min (+ piece-start (piece-length torrent))
                                        (total-length torrent))))
         (save-partial-piece client partial-piece))
-      (log:info "Storing block ~a-~a for piece ~a"
-                (start b) (+ (start b) (length (bytes b))) (piece-index b))
+      (log:debug "Storing block ~a-~a for piece ~a"
+                 (start b) (+ (start b) (length (bytes b))) (piece-index b))
       (block-insert partial-piece b)
       (pop-and-write-piece-if-ready client partial-piece))))
 
@@ -653,12 +665,10 @@ the peer."
     (remhash (piece-index partial-piece) (partial-pieces client))
     (let ((piece (stitch-together-piece partial-piece))
           (torrent (torrent client)))
-      (log:info "Piece ~a fully downloaded, checking hash." (index piece))
       (if (valid-piece-p (nth (index piece) (piece-hashes torrent)) piece)
           (progn
-            (log:info "Valid hash, storing.")
+            (log:info "Finished piece ~a, saving to disk." (index piece))
             (write-piece piece (files torrent))
-            (log:info "Piece stored successfully.")
             (incf (downloaded-bytes client) (size piece))
             (mark-piece client (index piece)))
           (log:warn "Piece ~a failed hash check, discarding." (index piece))))))
@@ -686,7 +696,8 @@ the peer."
 
 (defun send-requested-blocks (client)
   (loop for req in (requests-list client)
-        do (send-requested-block client req)))
+        do (send-requested-block client req))
+  (setf (requests-list client) nil))
 
 (defun send-requested-block (client req)
   (with-slots (torrent) client
@@ -776,7 +787,8 @@ the peer."
 (defun get-available-peers (client)
   (remove-if (lambda (ps)
                (or (they-choking ps)
-                   (max-capacity-p client ps)))
+                   (max-capacity-p client ps)
+                   (not (interested ps))))
              (peer-states client)))
 
 (defun max-capacity-p (client ps)

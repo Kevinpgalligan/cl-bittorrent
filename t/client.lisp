@@ -366,14 +366,20 @@
          (ps1 (make-peer-state torrent 0 1))
          (ps2 (make-peer-state torrent 0 2))
          (ps3 (make-peer-state torrent 0 3))
+         (ps4 (make-peer-state torrent 0 4))
          (client (make-test-client torrent (list ps1 ps2 ps3))))
-    (setf (bito::they-choking ps2) nil
-          (bito::they-choking ps3) nil)
+    (setf (bito::interested ps1) t
+          (bito::interested ps2) t
+          (bito::interested ps3) t
+          (bito::they-choking ps2) nil
+          (bito::they-choking ps3) nil
+          (bito::they-choking ps4) nil)
     (bito::mark-piece ps1 0)
     (bito::mark-piece ps2 0)
     (bito::mark-piece ps2 1)
     (bito::mark-piece ps2 8)
     (bito::mark-piece ps3 2)
+    (bito::mark-piece ps4 7)
     ;; Let's say we've accumulated the first block of the piece
     ;; at index 1, and there's an outstanding request for the
     ;; second block. Each piece in the test env consists of 3 blocks.
@@ -403,6 +409,8 @@
         (is (= 0 (num-messages-to-peer 1)))
         (is (= 4 (num-messages-to-peer 2)))
         (is (= 3 (num-messages-to-peer 3)))
+        ;; no requests expected 'cause we haven't expressed interest
+        (is (= 0 (num-messages-to-peer 4)))
         (is-true (find-if (lambda (data)
                             (and (= 1 (getf data :index))
                                  (= 80 (getf data :begin))
@@ -487,7 +495,8 @@
                                       :begin 0
                                       :block bdata))))
     (is (= 10 (bito::uploaded-bytes client)))
-    (is (= 10 (bito::uploaded-bytes-sum ps1)))))
+    (is (= 10 (bito::uploaded-bytes-sum ps1)))
+    (is-true (null (bito::requests-list client)))))
 
 (def-client-test connects-to-new-peers
   (let* ((torrent (make-test-torrent))

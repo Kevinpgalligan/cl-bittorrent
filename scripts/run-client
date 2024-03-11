@@ -38,4 +38,7 @@
   (format t "Torrent: ~a~%" (getf options :torrent))
   (format t "Download Directory: ~a~%" (getf options :dir))
   (format t "Running client.~%")
-  (download-torrent (getf options :torrent) (getf options :dir)))
+  (download-torrent (getf options :torrent)
+                    (getf options :dir)
+                    :log-level :debug
+                    :log-path "/tmp/c1-log.txt"))

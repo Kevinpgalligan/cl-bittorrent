@@ -34,11 +34,11 @@ To test 1 client with no peers: (1) start the dummy tracker, (2) run a client fr
 
 To test 2 clients talking to each other:
 
-0. Save tracker response to /tmp/ with `scripts/tracker.lisp`.
+0. Save tracker response to /tmp/ with `scripts/tracker.lisp`: just load the file and run `(save-tracker-response)`.
 1. Start the dummy tracker (`python3 scripts/tracker.py`).
-2. Run a client from the command-line (with `scripts/run-client --torrent data/for-tests.torrent --dir /tmp/`).
-3. Add that client's info (port and ID, from the logs) to the tracker. Note that the client's ID is URL-encoded and you will want to decode it using `(quri:url-decode "STRING-HERE" :encoding :latin1)`.
-4. Run another client from the REPL using `download-torrent`, this time include a bit vector as an extra argument indicating which pieces it has downloaded (in the test I'm doing, one client has all the data and the other has none). Example invocation: `(download-torrent "/path/to/cl-bittorrent/data/for-tests.torrent" "/path/to/downloaded/file/" :start-piecemap (make-array 901 :element-type 'bit :initial-element 1) :debug t)`.
+2. Run a client from the command-line (with `scripts/run-client --torrent data/for-tests.torrent --dir /tmp/`). `for-tests.torrent` will have to be recreated with whatever test data you wanna use.
+3. Add that client's info (port and ID, from the logs) to the tracker: `(set-peer! PORT-NUMBER "ID")`, then `(save-tracker-response)`. Note that the client's ID is URL-encoded and you will want to decode it using `(quri:url-decode "STRING-HERE" :encoding :latin1)`.
+4. Run a client from the REPL using `download-torrent`, this time include a bit vector as an extra argument indicating which pieces it has downloaded (in the test I'm doing, one client has all the data and the other has none). Example invocation: `(download-torrent "/path/to/cl-bittorrent/data/for-tests.torrent" "/path/to/downloaded/file/" :start-piecemap (make-array 901 :element-type 'bit :initial-element 1) :debug-p t :log-level :debug :log-path "/tmp/c2.log.txt")`.
 
 ### Missing features / wishlist
 * Pausing and resuming of downloads.
@@ -53,6 +53,7 @@ To test 2 clients talking to each other:
 * Handle case where client is in tracker's list of peers, i.e. don't try communicating with self.
 * Better tracking of upload/download rate for peers. Right now, peers could be sending us vast amounts of junk data, and we would consider them "good uploaders" & keep them unchoked. There's also no feedback from the worker threads to say that data was successfully sent to a peer.
 * A lot of data is being passed around as plists, which fail silently if there's a missing field or the wrong name is used to access a field. I don't like how fragile that is. Need to either replace the `getf`s with something that fails fast, or replace the plists with objects.
+* Peer thread should close socket on exit.
 
 ### References
 * <http://www.kristenwidman.com/blog/how-to-write-a-bittorrent-client-part-1/>
