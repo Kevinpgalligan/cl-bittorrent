@@ -701,14 +701,16 @@ the peer."
 
 (defun send-requested-block (client req)
   (with-slots (torrent) client
-    (let ((b (load-bytes-from-files
-              (torrent client)
-              (begin req)
-              (+ (begin req) (len req)))))
+    (let* ((start-index (+ (begin req)
+                           (* (piece-length torrent) (index req))))
+           (b (load-bytes-from-files
+               (torrent client)
+               start-index
+               (+ start-index (len req)))))
       (incf (uploaded-bytes client) (length b))
       ;; We assume that the bytes are actually sent by the peer thread, not
       ;; the most resilient approach. But if it fails to send, the connection will
-      ;; be dropped anyway, making accurate accounting unimportant.
+      ;; be dropped anyway, making accurate accounting not so important.
       (increment-uploaded-bytes (peer-state req) (length b))
       (send-to-peer (peer-state req)
                     :piece

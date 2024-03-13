@@ -486,7 +486,10 @@
                                   :length 10))
     (with-dynamic-stubs
         ((bito::load-bytes-from-files bdata))
-      (bito::send-requested-blocks client))
+      (bito::send-requested-blocks client)
+      (is (equalp
+           (list torrent (* 2 *piecesize*) (+ 10 (* 2 *piecesize*)))
+           (mockingbird:nth-mock-args-for 1 'bito::load-bytes-from-files))))
     (verify-peer-messages
      ps1
      (list (bito::make-message :id :piece

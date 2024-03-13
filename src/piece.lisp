@@ -106,6 +106,16 @@ with other blocks, etc."
    (absolute-end :initarg :absolute-end :reader absolute-end)
    (len :initarg :len :reader len)))
 
+(defmethod print-object ((obj file-range) stream)
+  (format stream
+          "#<FILE-RANGE path=~a relstart=~a relend=~a absstart=~a absend=~a len=~a"
+          (path obj)
+          (relative-start obj)
+          (relative-end obj)
+          (absolute-start obj)
+          (absolute-end obj)
+          (len obj)))
+
 (defun load-bytes-from-files (torrent start end)
   "Reads bytes from torrented files between START and END, which are indexes
 into the torrent data when laid out contiguously on the file system. This
@@ -114,6 +124,7 @@ should if the piece has been written there already."
   (let* ((frs (get-file-ranges (files torrent) start end))
          (buffer (make-array (reduce #'+ frs :key #'len :initial-value 0)
                              :element-type '(unsigned-byte 8))))
+    (log:debug "Loading bytes: ~a" frs)
     (loop with i = 0
           for fr in frs
           do (read-file-range-into-buffer fr buffer i)
