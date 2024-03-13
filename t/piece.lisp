@@ -86,9 +86,9 @@
          (piece2 (make-piece 2 10 15 #(10 11 12 13 14))))
     (unwind-protect
          (progn
+           (write-piece piece2 fss)
            (write-piece piece0 fss)
            (write-piece piece1 fss)
-           (write-piece piece2 fss)
            (is (equalp #(0 1 2 3 4 5 6 7 8 9 10 11 12 13 14)
                        (load-bytes-from-files torrent 0 15)))
            (is (equalp #(0 1 2 3 4)

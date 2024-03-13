@@ -36,9 +36,9 @@ To test 2 clients talking to each other:
 
 0. Save tracker response to /tmp/ with `scripts/tracker.lisp`: just load the file and run `(save-tracker-response)`.
 1. Start the dummy tracker (`python3 scripts/tracker.py`).
-2. Run a client from the command-line (with `scripts/run-client --torrent data/for-tests.torrent --dir /tmp/`). `for-tests.torrent` will have to be recreated with whatever test data you wanna use.
-3. Add that client's info (port and ID, from the logs) to the tracker: `(set-peer! PORT-NUMBER "ID")`, then `(save-tracker-response)`. Note that the client's ID is URL-encoded and you will want to decode it using `(quri:url-decode "STRING-HERE" :encoding :latin1)`.
-4. Run a client from the REPL using `download-torrent`, this time include a bit vector as an extra argument indicating which pieces it has downloaded (in the test I'm doing, one client has all the data and the other has none). Example invocation: `(download-torrent "/path/to/cl-bittorrent/data/for-tests.torrent" "/path/to/downloaded/file/" :start-piecemap (make-array 901 :element-type 'bit :initial-element 1) :debug-p t :log-level :debug :log-path "/tmp/c2-log.txt")`.
+2. Run a client from the command-line (with `./scripts/run-client --torrent data/test.torrent --dir /tmp/`).
+3. Add that client's info (port and ID, from the logs) to the tracker: `(set-peer! PORT-NUMBER "ID")`, then `(save-tracker-response)` again. Note that the client's ID is URL-encoded and you will want to decode it using `(quri:url-decode "STRING-HERE" :encoding :latin1)`.
+4. Run a client from the REPL using `download-torrent`, this time include a bit vector as an extra argument indicating which pieces it has downloaded (in the test I'm doing, one client has all the data and the other has none). Example invocation: `(download-torrent "/path/to/cl-bittorrent/data/test.torrent" "/path/to/cl-bittorrent/data/" :start-piecemap (make-array 3 :element-type 'bit :initial-element 1) :debug-p t :log-level :debug :log-path "/tmp/c2-log.txt")`.
 
 ### Missing features / wishlist
 * Pausing and resuming of downloads.

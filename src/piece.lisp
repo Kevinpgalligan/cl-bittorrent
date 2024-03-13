@@ -87,7 +87,7 @@ with other blocks, etc."
   (with-open-file (stream
                    (path fr)
                    :direction :output
-                   :if-exists :append
+                   :if-exists :overwrite
                    :if-does-not-exist :create
                    :element-type '(unsigned-byte 8))
     (file-position stream (relative-start fr))

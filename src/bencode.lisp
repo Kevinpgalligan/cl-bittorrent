@@ -6,6 +6,7 @@
    :bencode
    :bencode-to-stream
    :bdecode
+   :dict-p
    :dict-get
    :dict-has))
 
@@ -106,6 +107,9 @@ data structure is used to represent a dict, or any nested combination of
 those -- in the bencoding format. Output is a string."
   (with-output-to-string (s)
     (bencode-to-stream data s)))
+
+(defun dict-p (x)
+  (eq 'trees:binary-tree (class-name (class-of x))))
 
 (defun dict-get (dict &rest keys)
   "Get data from nested dicts. KEYS should be strings. Depending on the value
